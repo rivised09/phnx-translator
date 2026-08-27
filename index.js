@@ -504,9 +504,13 @@ function shouldIgnoreMessage(message) {
 
 /**
  * Detect the language of a text using Gemini.
- * Returns the language name (e.g. "English", "Russian").
+ * Returns the language code (e.g. "EN", "RU", "TH").
  */
 async function detectLanguage(text) {
+    const languageList = Object.entries(CONFIG.LANGUAGE_NAMES)
+        .map(([code, name]) => `${code}: ${name}`)
+        .join(", ");
+
     const maxRetries = geminiApiKeys.length;
     let lastError;
 
@@ -518,21 +522,22 @@ async function detectLanguage(text) {
                 await gemini.models.generateContent({
                     model: CONFIG.GEMINI_MODEL,
                     contents:
-                        `Reply with ONLY the language name ` +
-                        `(e.g. English, Russian, Thai). ` +
-                        `No explanation.\n\n` +
+                        `Detect the language of this text. ` +
+                        `Reply with ONLY the language code ` +
+                        `from this list: ${languageList}. ` +
+                        `If unknown, reply EN.\n\n` +
                         `Text: ${text.slice(0, 500)}`,
                     config: {
                         temperature: 0,
-                        maxOutputTokens: 10
+                        maxOutputTokens: 5
                     }
                 });
 
             const detected =
-                (response.text || "").trim();
+                (response.text || "").trim().toUpperCase();
 
-            if (!detected) {
-                return "English";
+            if (!detected || !CONFIG.LANGUAGE_NAMES[detected]) {
+                return "EN";
             }
 
             return detected;
@@ -919,10 +924,10 @@ async function handlePublicChat(message) {
     if (!message.content || !message.content.trim()) return true;
 
     // Detect source language via Gemini.
-    let sourceLanguage;
+    let sourceLanguageCode;
 
     try {
-        sourceLanguage =
+        sourceLanguageCode =
             await detectLanguage(message.content);
     } catch (error) {
         console.error(
@@ -934,11 +939,12 @@ async function handlePublicChat(message) {
     }
 
     // Already English, skip.
-    if (
-        sourceLanguage.toLowerCase() === "english"
-    ) {
+    if (sourceLanguageCode === "EN") {
         return true;
     }
+
+    const sourceLanguage =
+        getLanguageName(sourceLanguageCode);
 
     console.log(
         `🌍 Public chat: ${message.author.username} (${sourceLanguage})`
@@ -964,7 +970,7 @@ async function handlePublicChat(message) {
             message,
             "EN",
             translated,
-            "EN"
+            sourceLanguageCode
         );
     } catch (error) {
         console.error(
@@ -1057,6 +1063,8 @@ async function handleRestrictedChannel(message) {
             .join(", ")
     );
 
+    const translations = [];
+
     for (const targetLanguageCode of languagesPresent) {
         const targetLanguage =
             getLanguageName(targetLanguageCode);
@@ -1077,12 +1085,11 @@ async function handleRestrictedChannel(message) {
                 continue;
             }
 
-            await sendTranslation(
-                message,
-                targetLanguageCode,
-                translated,
-                authorLanguageCode
-            );
+            translations.push({
+                code: targetLanguageCode,
+                name: targetLanguage,
+                text: translated
+            });
 
             await sleep(250);
 
@@ -1092,6 +1099,37 @@ async function handleRestrictedChannel(message) {
                 error
             );
         }
+    }
+
+    if (translations.length === 0) {
+        return true;
+    }
+
+    const translationLines = translations
+        .map(t => `**${t.code}:** ${t.text}`)
+        .join("\n\n");
+
+    const combinedEmbed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle("\u200B")
+        .setThumbnail(message.author.displayAvatarURL())
+        .setDescription(
+            `**${message.author.username}**\n` +
+            message.content +
+            `\n\n` +
+            translationLines
+        );
+
+    try {
+        await message.channel.send({
+            embeds: [combinedEmbed],
+            allowedMentions: { parse: [] }
+        });
+    } catch (error) {
+        console.error(
+            "❌ Could not send combined translation:",
+            error
+        );
     }
 
     return true;
