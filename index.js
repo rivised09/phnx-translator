@@ -11,7 +11,9 @@ const {
     EmbedBuilder,
     ActionRowBuilder,
     ButtonBuilder,
-    ButtonStyle
+    ButtonStyle,
+    ContextMenuCommandBuilder,
+    ApplicationCommandType
 } = require("discord.js");
 
 const { GoogleGenAI } = require("@google/genai");
@@ -1144,6 +1146,250 @@ async function handleRestrictedChannel(message) {
 }
 
 // ============================================================
+// PRIVATE TRANSLATION (BUTTON + CONTEXT MENU)
+// ============================================================
+
+/**
+ * Translate a text into a member's preferred language and
+ * return the result. Detects whether translation is actually
+ * needed (e.g. the message may already be in the member's
+ * language, as with an Arabic member who writes in English).
+ *
+ * Returns an object:
+ *   { needed: bool, code: string, name: string, text: string }
+ */
+async function translateForMember(text, targetLanguageCode) {
+    const targetLanguage =
+        getLanguageName(targetLanguageCode);
+
+    // Detect the actual language of the message.
+    let sourceCode = "EN";
+    try {
+        sourceCode = await detectLanguage(text);
+    } catch (error) {
+        console.error(
+            "❌ Language detection failed:",
+            error
+        );
+    }
+
+    const sourceLanguage =
+        getLanguageName(sourceCode);
+
+    // If the message is already in the member's language
+    // (or undetected), no translation is needed.
+    if (sourceCode === targetLanguageCode) {
+        return {
+            needed: false,
+            code: targetLanguageCode,
+            name: targetLanguage,
+            text
+        };
+    }
+
+    const translated =
+        await translateText(
+            text,
+            sourceLanguage,
+            targetLanguage
+        );
+
+    return {
+        needed: true,
+        code: targetLanguageCode,
+        name: targetLanguage,
+        text: translated
+    };
+}
+
+/**
+ * Attach a single "🌐 Translate" button to an eligible
+ * message in the configured translation channels.
+ */
+async function attachTranslateButton(message) {
+    // Only for eligible human messages in translation channels.
+    if (shouldIgnoreMessage(message)) return;
+    if (!message.channel) return;
+
+    const translateButton = new ButtonBuilder()
+        .setCustomId(`translate_${message.id}`)
+        .setLabel("Translate to my language")
+        .setEmoji("🌐")
+        .setStyle(ButtonStyle.Primary);
+
+    const row = new ActionRowBuilder()
+        .addComponents(translateButton);
+
+    try {
+        await message.reply({
+            content: "\u200B",
+            components: [row]
+        });
+    } catch (error) {
+        console.error(
+            "❌ Could not attach translate button:",
+            error
+        );
+    }
+}
+
+/**
+ * Get a message by ID from the interaction's channel.
+ */
+async function fetchMessageInChannel(interaction, messageId) {
+    return await interaction.channel.messages.fetch(
+        messageId
+    );
+}
+
+/**
+ * Shared logic: produce and send a private translation for a
+ * member based on a given message. Used by both the button
+ * interaction and the context-menu interaction.
+ *
+ * Returns the ephemeral reply content (or null if skipped).
+ */
+async function sendPrivateTranslation(interaction, targetMessage) {
+    // Determine the clicking member's language role.
+    let member = interaction.member;
+
+    if (member && !member.roles) {
+        try {
+            member = await interaction.guild.members.fetch(
+                interaction.user.id
+            );
+        } catch {
+            // ignore
+        }
+    }
+
+    const languageCode =
+        userLanguageCache.get(interaction.user.id) ||
+        getMemberLanguageCode(member);
+
+    if (!languageCode) {
+        return {
+            error: "❌ You don't have a language role set. " +
+                "Please pick your language during onboarding."
+        };
+    }
+
+    const languageName =
+        getLanguageName(languageCode);
+
+    try {
+        // Handles the "Arabic member writes in English" case:
+        // detects the actual message language and skips if it
+        // already matches the member's language.
+        const result =
+            await translateForMember(
+                targetMessage.content,
+                languageCode
+            );
+
+        if (!result.needed) {
+            return {
+                content:
+                    `ℹ️ That message is already in **${languageName}** — ` +
+                    `no translation needed.`
+            };
+        }
+
+        if (
+            !result.text ||
+            result.text.trim() ===
+                targetMessage.content.trim()
+        ) {
+            return {
+                content:
+                    `ℹ️ Nothing to translate into **${languageName}**.`
+            };
+        }
+
+        return {
+            content:
+                `> **${targetMessage.author.username}** · ${languageName}\n\n` +
+                result.text,
+            embeds: [],
+            components: []
+        };
+
+    } catch (error) {
+        console.error(
+            "❌ Private translation error:",
+            error
+        );
+
+        return {
+            error:
+                "❌ Translation failed. Please try again later."
+        };
+    }
+}
+
+/**
+ * Handle a "🌐 Translate" button click.
+ */
+async function handleTranslateButton(interaction) {
+    const messageId = interaction.customId.replace(
+        "translate_",
+        ""
+    );
+
+    // Reply is deferred because translation can exceed
+    // the 3-second interaction window.
+    await interaction.deferReply({ flags: 64 });
+
+    let targetMessage;
+    try {
+        targetMessage =
+            await fetchMessageInChannel(
+                interaction,
+                messageId
+            );
+    } catch (error) {
+        console.error(
+            "❌ Could not fetch target message:",
+            error
+        );
+
+        await interaction.editReply({
+            content:
+                "❌ Could not find the message to translate."
+        });
+        return;
+    }
+
+    if (
+        !targetMessage.content ||
+        !targetMessage.content.trim()
+    ) {
+        await interaction.editReply({
+            content:
+                "❌ This message has no text to translate."
+        });
+        return;
+    }
+
+    const result =
+        await sendPrivateTranslation(
+            interaction,
+            targetMessage
+        );
+
+    if (result.error) {
+        await interaction.editReply({
+            content: result.error
+        });
+        return;
+    }
+
+    await interaction.editReply({
+        content: result.content
+    });
+}
+
+// ============================================================
 // AUTOMATIC TRANSLATION
 // ============================================================
 
@@ -1358,7 +1604,11 @@ const commands = [
         .setName("translation-status")
         .setDescription(
             "Show translator status."
-        )
+        ),
+
+    new ContextMenuCommandBuilder()
+        .setName("🌐 Translate")
+        .setType(ApplicationCommandType.Message)
 ];
 
 // ============================================================
@@ -1396,6 +1646,49 @@ async function registerCommands() {
 discordClient.on(
     Events.InteractionCreate,
     async interaction => {
+
+        // ====================================================
+        // Message context-menu: "🌐 Translate"
+        // ====================================================
+
+        if (
+            interaction.isMessageContextMenuCommand() &&
+            interaction.commandName === "🌐 Translate"
+        ) {
+            await interaction.deferReply({ flags: 64 });
+
+            const targetMessage =
+                interaction.targetMessage;
+
+            if (
+                !targetMessage.content ||
+                !targetMessage.content.trim()
+            ) {
+                await interaction.editReply({
+                    content:
+                        "❌ This message has no text to translate."
+                });
+                return;
+            }
+
+            const result =
+                await sendPrivateTranslation(
+                    interaction,
+                    targetMessage
+                );
+
+            if (result.error) {
+                await interaction.editReply({
+                    content: result.error
+                });
+                return;
+            }
+
+            await interaction.editReply({
+                content: result.content
+            });
+            return;
+        }
 
         if (!interaction.isChatInputCommand()) {
             return;
@@ -1730,6 +2023,15 @@ discordClient.on(
 
         const customId = interaction.customId;
 
+        // ====================================================
+        // PRIVATE TRANSLATE BUTTON
+        // ====================================================
+
+        if (customId.startsWith("translate_")) {
+            await handleTranslateButton(interaction);
+            return;
+        }
+
         if (
             !customId.startsWith("verify_approve_") &&
             !customId.startsWith("verify_cancel_")
@@ -1896,8 +2198,9 @@ discordClient.on(
                 return;
             }
 
-            // Normal translation channels.
-            await handleTranslation(
+            // Normal translation channels: attach a private
+            // translate button instead of posting translations.
+            await attachTranslateButton(
                 message
             );
         } catch (error) {
