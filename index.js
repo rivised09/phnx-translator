@@ -115,6 +115,24 @@ const CONFIG = {
         process.env.PINGS_CHANNEL_ID
     ].filter(Boolean),
 
+    // Restricted channels: only verified members can trigger
+    // translation. Posts here translate only to languages
+    // that have active members.
+    //
+    // To add more channels, just add their IDs to this array.
+    RESTRICTED_CHANNELS: [
+        process.env.PERSONAL_PINGS_CHANNEL_ID
+    ].filter(Boolean),
+
+    // Public channels: for guests/unverified users.
+    // No role required. Everything is translated to English.
+    // If already English, no translation is sent.
+    //
+    // To add more channels, just add their IDs to this array.
+    PUBLIC_CHAT_CHANNELS: [
+        process.env.PUBLIC_CHAT_CHANNEL_ID
+    ].filter(Boolean),
+
     // Role that indicates the member is verified.
     //
     // If you want translation BEFORE verification,
@@ -485,6 +503,66 @@ function shouldIgnoreMessage(message) {
 // ============================================================
 
 /**
+ * Detect the language of a text using Gemini.
+ * Returns the language name (e.g. "English", "Russian").
+ */
+async function detectLanguage(text) {
+    const maxRetries = geminiApiKeys.length;
+    let lastError;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        gemini = createGeminiClient();
+
+        try {
+            const response =
+                await gemini.models.generateContent({
+                    model: CONFIG.GEMINI_MODEL,
+                    contents:
+                        `Reply with ONLY the language name ` +
+                        `(e.g. English, Russian, Thai). ` +
+                        `No explanation.\n\n` +
+                        `Text: ${text.slice(0, 500)}`,
+                    config: {
+                        temperature: 0,
+                        maxOutputTokens: 10
+                    }
+                });
+
+            const detected =
+                (response.text || "").trim();
+
+            if (!detected) {
+                return "English";
+            }
+
+            return detected;
+
+        } catch (error) {
+            lastError = error;
+            const msg = error.message || "";
+
+            if (
+                attempt < maxRetries - 1 &&
+                (
+                    msg.includes("RESOURCE_EXHAUSTED") ||
+                    msg.includes("429") ||
+                    msg.includes("UNAVAILABLE") ||
+                    msg.includes("503") ||
+                    msg.includes("quota") ||
+                    msg.includes("limit")
+                )
+            ) {
+                continue;
+            }
+
+            throw error;
+        }
+    }
+
+    throw lastError;
+}
+
+/**
  * Translate text using Gemini.
  */
 async function translateText(
@@ -821,6 +899,196 @@ async function determineTargetLanguages(
     languagesPresent.delete(authorLanguageCode);
 
     return languagesPresent;
+}
+
+/**
+ * Handle translation in public chat channels.
+ * No role required. Translates everything to English.
+ * If already English, no translation is sent.
+ */
+async function handlePublicChat(message) {
+    if (
+        !CONFIG.PUBLIC_CHAT_CHANNELS.includes(
+            message.channel.id
+        )
+    ) {
+        return false;
+    }
+
+    // Detect source language via Gemini.
+    let sourceLanguage;
+
+    try {
+        sourceLanguage =
+            await detectLanguage(message.content);
+    } catch (error) {
+        console.error(
+            "❌ Language detection failed:",
+            error
+        );
+
+        return true;
+    }
+
+    // Already English, skip.
+    if (
+        sourceLanguage.toLowerCase() === "english"
+    ) {
+        return true;
+    }
+
+    console.log(
+        `🌍 Public chat: ${message.user.username} (${sourceLanguage})`
+    );
+
+    try {
+        const translated =
+            await translateText(
+                message.content,
+                sourceLanguage,
+                "English"
+            );
+
+        if (
+            !translated ||
+            translated.trim() ===
+                message.content.trim()
+        ) {
+            return true;
+        }
+
+        await sendTranslation(
+            message,
+            "EN",
+            translated,
+            "EN"
+        );
+    } catch (error) {
+        console.error(
+            `❌ Translation failed: ${sourceLanguage} -> English`,
+            error
+        );
+    }
+
+    return true;
+}
+
+/**
+ * Handle translation in restricted channels.
+ * Only verified members can trigger translation.
+ * Translates only to languages that have active members.
+ */
+async function handleRestrictedChannel(message) {
+    if (
+        !CONFIG.RESTRICTED_CHANNELS.includes(
+            message.channel.id
+        )
+    ) {
+        return false;
+    }
+
+    if (!message.member) {
+        try {
+            message.member =
+                await message.guild.members.fetch(
+                    message.author.id
+                );
+        } catch {
+            return true;
+        }
+    }
+
+    // Check if user has the verified role.
+    const hasRole =
+        CONFIG.VERIFIED_ROLE_ID &&
+        message.member.roles.cache.has(
+            CONFIG.VERIFIED_ROLE_ID
+        );
+
+    if (!hasRole) {
+        console.log(
+            `🔒 ${message.user.username} is not verified in restricted channel.`
+        );
+
+        return true;
+    }
+
+    const guild = message.guild;
+
+    const authorLanguageCode =
+        userLanguageCache.get(message.member.id) ||
+        getMemberLanguageCode(message.member);
+
+    if (!authorLanguageCode) {
+        console.log(
+            `ℹ️ ${message.user.username} has no language role.`
+        );
+
+        return true;
+    }
+
+    const sourceLanguage =
+        getLanguageName(authorLanguageCode);
+
+    // Only translate to languages where members exist.
+    const languagesPresent =
+        getLanguagesPresentInGuild(guild);
+
+    languagesPresent.delete(authorLanguageCode);
+
+    if (languagesPresent.size === 0) {
+        return true;
+    }
+
+    console.log(
+        `🔒 ${message.user.username} (${sourceLanguage}) in restricted channel`
+    );
+
+    console.log(
+        `➡️ Translating to:`,
+        [...languagesPresent]
+            .map(getLanguageName)
+            .join(", ")
+    );
+
+    for (const targetLanguageCode of languagesPresent) {
+        const targetLanguage =
+            getLanguageName(targetLanguageCode);
+
+        try {
+            const translated =
+                await translateText(
+                    message.content,
+                    sourceLanguage,
+                    targetLanguage
+                );
+
+            if (
+                !translated ||
+                translated.trim() ===
+                    message.content.trim()
+            ) {
+                continue;
+            }
+
+            await sendTranslation(
+                message,
+                targetLanguageCode,
+                translated,
+                authorLanguageCode
+            );
+
+            await sleep(250);
+
+        } catch (error) {
+            console.error(
+                `❌ Translation failed: ${sourceLanguage} -> ${targetLanguage}`,
+                error
+            );
+        }
+    }
+
+    return true;
 }
 
 // ============================================================
@@ -1202,10 +1470,21 @@ discordClient.on(
                     .map(id => `<#${id}>`)
                     .join(", ");
 
+            const restrictedList =
+                CONFIG.RESTRICTED_CHANNELS
+                    .map(id => `<#${id}>`)
+                    .join(", ");
+
+            const publicList =
+                CONFIG.PUBLIC_CHAT_CHANNELS
+                    .map(id => `<#${id}>`)
+                    .join(", ");
+
             await interaction.reply({
                 content:
                     `🐦‍🔥 **973 Translator Status**\n\n` +
                     `Model: \`${CONFIG.GEMINI_MODEL}\`\n` +
+                    `API Keys: **${geminiApiKeys.length}**\n` +
                     `Members cached: **${userLanguageCache.size}**\n` +
                     `Languages present: **${
                         [...languages]
@@ -1217,6 +1496,8 @@ discordClient.on(
                         "None"
                     }**\n` +
                     `Translation channels: ${channelList || "None"}\n` +
+                    `Restricted channels: ${restrictedList || "None"}\n` +
+                    `Public chat channels: ${publicList || "None"}\n` +
                     `Translation cache: **${translationCache.size}**`,
                 ephemeral: true
             });
@@ -1235,6 +1516,25 @@ discordClient.on(
     async message => {
 
         try {
+            // Restricted channels take priority.
+            if (
+                await handleRestrictedChannel(
+                    message
+                )
+            ) {
+                return;
+            }
+
+            // Public chat channels next.
+            if (
+                await handlePublicChat(
+                    message
+                )
+            ) {
+                return;
+            }
+
+            // Normal translation channels.
             await handleTranslation(
                 message
             );
@@ -1326,6 +1626,12 @@ discordClient.once(
         );
         console.log(
             `Channels: ${CONFIG.TRANSLATION_CHANNELS.join(", ")}`
+        );
+        console.log(
+            `Restricted: ${CONFIG.RESTRICTED_CHANNELS.join(", ") || "None"}`
+        );
+        console.log(
+            `Public chat: ${CONFIG.PUBLIC_CHAT_CHANNELS.join(", ") || "None"}`
         );
 
         try {
