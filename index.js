@@ -915,6 +915,9 @@ async function handlePublicChat(message) {
         return false;
     }
 
+    if (!message.author) return true;
+    if (!message.content || !message.content.trim()) return true;
+
     // Detect source language via Gemini.
     let sourceLanguage;
 
@@ -938,7 +941,7 @@ async function handlePublicChat(message) {
     }
 
     console.log(
-        `🌍 Public chat: ${message.user.username} (${sourceLanguage})`
+        `🌍 Public chat: ${message.author.username} (${sourceLanguage})`
     );
 
     try {
@@ -987,6 +990,9 @@ async function handleRestrictedChannel(message) {
         return false;
     }
 
+    if (!message.author) return true;
+    if (!message.content || !message.content.trim()) return true;
+
     if (!message.member) {
         try {
             message.member =
@@ -1007,7 +1013,7 @@ async function handleRestrictedChannel(message) {
 
     if (!hasRole) {
         console.log(
-            `🔒 ${message.user.username} is not verified in restricted channel.`
+            `🔒 ${message.author.username} is not verified in restricted channel.`
         );
 
         return true;
@@ -1021,7 +1027,7 @@ async function handleRestrictedChannel(message) {
 
     if (!authorLanguageCode) {
         console.log(
-            `ℹ️ ${message.user.username} has no language role.`
+            `ℹ️ ${message.author.username} has no language role.`
         );
 
         return true;
@@ -1041,7 +1047,7 @@ async function handleRestrictedChannel(message) {
     }
 
     console.log(
-        `🔒 ${message.user.username} (${sourceLanguage}) in restricted channel`
+        `🔒 ${message.author.username} (${sourceLanguage}) in restricted channel`
     );
 
     console.log(
