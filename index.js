@@ -1227,6 +1227,8 @@ async function handleTranslation(message) {
     // TRANSLATE
     // ========================================================
 
+    const translations = [];
+
     for (const targetLanguageCode of languagesPresent) {
         const targetLanguage =
             getLanguageName(targetLanguageCode);
@@ -1247,15 +1249,12 @@ async function handleTranslation(message) {
                 continue;
             }
 
-            await sendTranslation(
-                message,
-                targetLanguageCode,
-                translated,
-                authorLanguageCode
-            );
+            translations.push({
+                code: targetLanguageCode,
+                name: targetLanguage,
+                text: translated
+            });
 
-            // Small delay so multiple translations
-            // don't hit Discord simultaneously.
             await sleep(250);
 
         } catch (error) {
@@ -1264,6 +1263,51 @@ async function handleTranslation(message) {
                 error
             );
         }
+    }
+
+    if (translations.length === 0) {
+        return;
+    }
+
+    const translationLines = translations
+        .map(t => `**${t.code}:** ${t.text}`)
+        .join("\n\n");
+
+    const sourceEmbed = new EmbedBuilder()
+        .setColor(0xED4245)
+        .setTitle("\u200B")
+        .setThumbnail(message.author.displayAvatarURL())
+        .setDescription(
+            `**${message.author.username}**\n` +
+            message.content +
+            `\n\n*${sourceLanguage}*`
+        );
+
+    const translatedEmbed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle("\u200B")
+        .setDescription(translationLines);
+
+    try {
+        const sent =
+            await message.channel.send({
+                embeds: [sourceEmbed, translatedEmbed],
+                allowedMentions: {
+                    parse: []
+                }
+            });
+
+        botMessageIds.add(sent.id);
+
+        setTimeout(() => {
+            botMessageIds.delete(sent.id);
+        }, 10 * 60 * 1000);
+
+    } catch (error) {
+        console.error(
+            "❌ Could not send translation:",
+            error
+        );
     }
 }
 
