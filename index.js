@@ -1712,6 +1712,9 @@ discordClient.on(
             customId.startsWith("verify_approve_");
 
         if (isApprove) {
+            // Respond immediately to avoid timeout.
+            await interaction.deferUpdate();
+
             // Find the original message author.
             try {
                 const originalMessage =
@@ -1776,14 +1779,13 @@ discordClient.on(
             } catch (error) {
                 console.error(
                     "❌ Verification failed:",
-                    error
+                    error.message || error
                 );
 
-                await interaction.update({
+                await interaction.followUp({
                     content:
-                        "❌ Could not verify — user may have left.",
-                    embeds: [],
-                    components: []
+                        `❌ Verify failed: ${error.message || "Unknown error"}`,
+                    flags: 64
                 });
             }
         } else {
