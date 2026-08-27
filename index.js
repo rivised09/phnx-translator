@@ -1211,18 +1211,35 @@ async function attachTranslateButton(message) {
     if (shouldIgnoreMessage(message)) return;
     if (!message.channel) return;
 
+    // Only attach the button when there is actual text to
+    // translate. Pure emoji / image-without-caption / gif
+    // messages have no translatable content, so no button.
+    const hasText =
+        message.content &&
+        message.content.trim().length > 0;
+
+    if (!hasText) return;
+
+    // Resolve the display name: prefer the server nickname,
+    // falling back to the global username.
+    const displayName =
+        (message.member &&
+            message.member.displayName) ||
+        message.author.username;
+
     const translateButton = new ButtonBuilder()
         .setCustomId(`translate_${message.id}`)
-        .setLabel("Translate to my language")
+        .setLabel("Translate")
         .setEmoji("🌐")
-        .setStyle(ButtonStyle.Primary);
+        .setStyle(ButtonStyle.Secondary);
 
     const row = new ActionRowBuilder()
         .addComponents(translateButton);
 
     try {
         await message.reply({
-            content: "\u200B",
+            content: `**${displayName}** · *English*`,
+            allowedMentions: { parse: [] },
             components: [row]
         });
     } catch (error) {
@@ -1277,6 +1294,25 @@ async function sendPrivateTranslation(interaction, targetMessage) {
     const languageName =
         getLanguageName(languageCode);
 
+    // Resolve the source message author's server nickname.
+    let authorName = targetMessage.author.username;
+
+    try {
+        const authorMember =
+            await interaction.guild.members.fetch(
+                targetMessage.author.id
+            );
+
+        if (
+            authorMember &&
+            authorMember.displayName
+        ) {
+            authorName = authorMember.displayName;
+        }
+    } catch {
+        // Fall back to username if member can't be fetched.
+    }
+
     try {
         // Handles the "Arabic member writes in English" case:
         // detects the actual message language and skips if it
@@ -1308,7 +1344,7 @@ async function sendPrivateTranslation(interaction, targetMessage) {
 
         return {
             content:
-                `> **${targetMessage.author.username}** · ${languageName}\n\n` +
+                `> **${authorName}** · ${languageName}\n\n` +
                 result.text,
             embeds: [],
             components: []
