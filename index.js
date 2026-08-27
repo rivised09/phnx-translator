@@ -1376,7 +1376,7 @@ discordClient.on(
                 await interaction.reply({
                     content:
                         "❌ You don't currently have a supported language role.",
-                    ephemeral: true
+                    flags: 64
                 });
 
                 return;
@@ -1385,7 +1385,7 @@ discordClient.on(
             await interaction.reply({
                 content:
                     `🌐 Your language is **${languageCode} — ${getLanguageName(languageCode)}**.`,
-                ephemeral: true
+                flags: 64
             });
 
             return;
@@ -1417,14 +1417,14 @@ discordClient.on(
                         `Supported: ${Object.keys(
                             CONFIG.LANGUAGE_NAMES
                         ).join(", ")}`,
-                    ephemeral: true
+                    flags: 64
                 });
 
                 return;
             }
 
             await interaction.deferReply({
-                ephemeral: true
+                flags: 64
             });
 
             try {
@@ -1469,7 +1469,7 @@ discordClient.on(
                 await interaction.reply({
                     content:
                         "❌ You need Manage Server permission.",
-                    ephemeral: true
+                    flags: 64
                 });
 
                 return;
@@ -1486,7 +1486,7 @@ discordClient.on(
                     content:
                         `✅ Language cache rebuilt.\n` +
                         `Members with language roles: **${userLanguageCache.size}**`,
-                    ephemeral: true
+                    flags: 64
                 });
 
             } catch (error) {
@@ -1496,7 +1496,7 @@ discordClient.on(
                 await interaction.reply({
                     content:
                         "❌ Failed to reload member data.",
-                    ephemeral: true
+                    flags: 64
                 });
             }
 
@@ -1551,7 +1551,7 @@ discordClient.on(
                     `Restricted channels: ${restrictedList || "None"}\n` +
                     `Public chat channels: ${publicList || "None"}\n` +
                     `Translation cache: **${translationCache.size}**`,
-                ephemeral: true
+                flags: 64
             });
 
             return;
@@ -1566,6 +1566,9 @@ discordClient.on(
 const IMAGE_EXTENSIONS = [
     ".png", ".jpg", ".jpeg", ".gif", ".webp"
 ];
+
+// userId -> Set of pending verification message IDs
+const pendingVerifications = new Map();
 
 function hasImageAttachment(message) {
     if (!message.attachments || message.attachments.size === 0) {
@@ -1648,10 +1651,20 @@ async function handleVerification(message) {
         );
 
     try {
-        await message.channel.send({
+        const sent = await message.channel.send({
             embeds: [embed],
             components: [row]
         });
+
+        // Track pending verification for this user.
+        const userId = message.author.id;
+
+        if (!pendingVerifications.has(userId)) {
+            pendingVerifications.set(userId, new Set());
+        }
+
+        pendingVerifications.get(userId).add(sent.id);
+
     } catch (error) {
         console.error(
             "❌ Could not send verification prompt:",
@@ -1685,7 +1698,7 @@ discordClient.on(
             await interaction.reply({
                 content:
                     "❌ Only leadership can use this button.",
-                ephemeral: true
+                flags: 64
             });
             return;
         }
@@ -1706,11 +1719,15 @@ discordClient.on(
                         messageId
                     );
 
+                const targetUserId =
+                    originalMessage.author.id;
+
                 const targetMember =
                     await interaction.guild.members.fetch(
-                        originalMessage.author.id
+                        targetUserId
                     );
 
+                // Assign verified role.
                 if (
                     CONFIG.VERIFIED_ROLE_ID &&
                     !targetMember.roles.cache.has(
@@ -1722,15 +1739,38 @@ discordClient.on(
                     );
                 }
 
-                await interaction.update({
-                    content:
-                        `✅ **Verified** by ${interaction.user.username}`,
-                    embeds: [],
-                    components: []
-                });
+                // Update ALL pending embeds for this user.
+                const pending =
+                    pendingVerifications.get(
+                        targetUserId
+                    ) || new Set();
+
+                for (const pendingMsgId of pending) {
+                    try {
+                        const msg =
+                            await interaction.channel.messages.fetch(
+                                pendingMsgId
+                            );
+
+                        if (msg.embeds.length > 0) {
+                            await msg.edit({
+                                content:
+                                    `✅ **Verified** by ${interaction.user.username}`,
+                                embeds: [],
+                                components: []
+                            });
+                        }
+                    } catch {
+                        // Message may have been deleted.
+                    }
+                }
+
+                pendingVerifications.delete(
+                    targetUserId
+                );
 
                 console.log(
-                    `✅ ${targetMember.user.username} verified by ${interaction.user.username}`
+                    `✅ ${targetMember.user.username} verified by ${interaction.user.username} (${pending.size} screenshot(s))`
                 );
 
             } catch (error) {
@@ -1747,6 +1787,19 @@ discordClient.on(
                 });
             }
         } else {
+            // Cancel: only this screenshot.
+            pendingVerifications.forEach(
+                (set, userId) => {
+                    set.delete(messageId);
+
+                    if (set.size === 0) {
+                        pendingVerifications.delete(
+                            userId
+                        );
+                    }
+                }
+            );
+
             await interaction.update({
                 content:
                     `❌ **Cancelled** by ${interaction.user.username}`,
