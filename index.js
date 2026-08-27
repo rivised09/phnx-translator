@@ -8,7 +8,10 @@ const {
     Routes,
     SlashCommandBuilder,
     PermissionFlagsBits,
-    EmbedBuilder
+    EmbedBuilder,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle
 } = require("discord.js");
 
 const { GoogleGenAI } = require("@google/genai");
@@ -138,6 +141,11 @@ const CONFIG = {
     // If you want translation BEFORE verification,
     // leave this empty in .env.
     VERIFIED_ROLE_ID: process.env.VERIFIED_ROLE_ID || "",
+
+    // Verification channel: users post account screenshots.
+    // Leadership can approve or cancel.
+    VERIFICATION_CHANNEL_ID: process.env.VERIFICATION_CHANNEL_ID || "",
+    LEADERSHIP_ROLE_ID: process.env.LEADERSHIP_ROLE_ID || "",
 
     // Ignore very short messages.
     MINIMUM_MESSAGE_LENGTH: 2,
@@ -1552,6 +1560,208 @@ discordClient.on(
 );
 
 // ============================================================
+// VERIFICATION SYSTEM
+// ============================================================
+
+const IMAGE_EXTENSIONS = [
+    ".png", ".jpg", ".jpeg", ".gif", ".webp"
+];
+
+function hasImageAttachment(message) {
+    if (!message.attachments || message.attachments.size === 0) {
+        return false;
+    }
+
+    for (const [, attachment] of message.attachments) {
+        const name =
+            (attachment.name || "").toLowerCase();
+
+        if (
+            IMAGE_EXTENSIONS.some(ext => name.endsWith(ext))
+        ) {
+            return true;
+        }
+
+        if (
+            attachment.contentType &&
+            attachment.contentType.startsWith("image/")
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function hasLeadershipRole(member) {
+    if (
+        !CONFIG.LEADERSHIP_ROLE_ID ||
+        !member ||
+        !member.roles
+    ) {
+        return false;
+    }
+
+    return member.roles.cache.has(
+        CONFIG.LEADERSHIP_ROLE_ID
+    );
+}
+
+async function handleVerification(message) {
+    if (
+        !CONFIG.VERIFICATION_CHANNEL_ID ||
+        message.channel.id !== CONFIG.VERIFICATION_CHANNEL_ID
+    ) {
+        return false;
+    }
+
+    if (!message.author) return true;
+    if (!hasImageAttachment(message)) return true;
+
+    const verifyButton = new ButtonBuilder()
+        .setCustomId(`verify_approve_${message.id}`)
+        .setLabel("Verify")
+        .setEmoji("✅")
+        .setStyle(ButtonStyle.Success);
+
+    const cancelButton = new ButtonBuilder()
+        .setCustomId(`verify_cancel_${message.id}`)
+        .setLabel("Cancel")
+        .setEmoji("❌")
+        .setStyle(ButtonStyle.Danger);
+
+    const row = new ActionRowBuilder()
+        .addComponents(verifyButton, cancelButton);
+
+    const embed = new EmbedBuilder()
+        .setColor(0xFEE75C)
+        .setTitle("\u200B")
+        .setAuthor({
+            name: message.author.username,
+            iconURL: message.author.displayAvatarURL()
+        })
+        .setDescription(
+            `Account screenshot submitted for verification.`
+        )
+        .setImage(
+            message.attachments.first().url
+        );
+
+    try {
+        await message.channel.send({
+            embeds: [embed],
+            components: [row]
+        });
+    } catch (error) {
+        console.error(
+            "❌ Could not send verification prompt:",
+            error
+        );
+    }
+
+    return true;
+}
+
+// ============================================================
+// BUTTON INTERACTION HANDLER
+// ============================================================
+
+discordClient.on(
+    Events.InteractionCreate,
+    async interaction => {
+        if (!interaction.isButton()) return;
+
+        const customId = interaction.customId;
+
+        if (
+            !customId.startsWith("verify_approve_") &&
+            !customId.startsWith("verify_cancel_")
+        ) {
+            return;
+        }
+
+        // Only leadership can use these buttons.
+        if (!hasLeadershipRole(interaction.member)) {
+            await interaction.reply({
+                content:
+                    "❌ Only leadership can use this button.",
+                ephemeral: true
+            });
+            return;
+        }
+
+        const messageId = customId.replace(
+            "verify_approve_",
+            ""
+        ).replace("verify_cancel_", "");
+
+        const isApprove =
+            customId.startsWith("verify_approve_");
+
+        if (isApprove) {
+            // Find the original message author.
+            try {
+                const originalMessage =
+                    await interaction.channel.messages.fetch(
+                        messageId
+                    );
+
+                const targetMember =
+                    await interaction.guild.members.fetch(
+                        originalMessage.author.id
+                    );
+
+                if (
+                    CONFIG.VERIFIED_ROLE_ID &&
+                    !targetMember.roles.cache.has(
+                        CONFIG.VERIFIED_ROLE_ID
+                    )
+                ) {
+                    await targetMember.roles.add(
+                        CONFIG.VERIFIED_ROLE_ID
+                    );
+                }
+
+                await interaction.update({
+                    content:
+                        `✅ **Verified** by ${interaction.user.username}`,
+                    embeds: [],
+                    components: []
+                });
+
+                console.log(
+                    `✅ ${targetMember.user.username} verified by ${interaction.user.username}`
+                );
+
+            } catch (error) {
+                console.error(
+                    "❌ Verification failed:",
+                    error
+                );
+
+                await interaction.update({
+                    content:
+                        "❌ Could not verify — user may have left.",
+                    embeds: [],
+                    components: []
+                });
+            }
+        } else {
+            await interaction.update({
+                content:
+                    `❌ **Cancelled** by ${interaction.user.username}`,
+                embeds: [],
+                components: []
+            });
+
+            console.log(
+                `❌ Verification cancelled by ${interaction.user.username}`
+            );
+        }
+    }
+);
+
+// ============================================================
 // MESSAGE EVENT
 // ============================================================
 
@@ -1560,6 +1770,15 @@ discordClient.on(
     async message => {
 
         try {
+            // Verification channel takes priority.
+            if (
+                await handleVerification(
+                    message
+                )
+            ) {
+                return;
+            }
+
             // Restricted channels take priority.
             if (
                 await handleRestrictedChannel(
