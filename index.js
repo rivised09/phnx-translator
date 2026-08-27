@@ -1104,9 +1104,25 @@ async function translateForMember(text, targetLanguageCode) {
  * message in the configured translation channels.
  */
 async function attachTranslateButton(message) {
-    // Only for eligible human messages in translation channels.
-    if (shouldIgnoreMessage(message)) return;
+    if (!message) return;
     if (!message.channel) return;
+
+    // Bot / webhook / bot-translation messages are never eligible.
+    if (message.author.bot) return;
+    if (message.webhookId) return;
+    if (botMessageIds.has(message.id)) return;
+
+    // Only in translation or restricted channels.
+    const inTranslation =
+        CONFIG.TRANSLATION_CHANNELS.includes(
+            message.channel.id
+        );
+    const inRestricted =
+        CONFIG.RESTRICTED_CHANNELS.includes(
+            message.channel.id
+        );
+
+    if (!inTranslation && !inRestricted) return;
 
     // Only attach the button when there is actual text to
     // translate. Pure emoji / image-without-caption / gif
@@ -1127,8 +1143,7 @@ async function attachTranslateButton(message) {
     const translateButton = new ButtonBuilder()
         .setCustomId(`translate_${message.id}`)
         .setLabel("Translate")
-        .setEmoji("🌐")
-        .setStyle(ButtonStyle.Secondary);
+        .setStyle(ButtonStyle.Primary);
 
     const row = new ActionRowBuilder()
         .addComponents(translateButton);
