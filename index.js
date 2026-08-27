@@ -37,7 +37,22 @@ const CONFIG = {
         ES: "🌐 ES",
         ID: "🌐 ID",
         FR: "🌐 FR",
-        DE: "🌐 DE"
+        DE: "🌐 DE",
+        TH: "🌐 TH",
+        AR: "🌐 AR",
+        PT: "🌐 PT",
+        JA: "🌐 JA",
+        KO: "🌐 KO",
+        VI: "🌐 VI",
+        TR: "🌐 TR",
+        HI: "🌐 HI",
+        IT: "🌐 IT",
+        PL: "🌐 PL",
+        NL: "🌐 NL",
+        SV: "🌐 SV",
+        UK: "🌐 UK",
+        FA: "🌐 FA",
+        MS: "🌐 MS"
     },
 
     // Languages shown in translation headers.
@@ -49,7 +64,22 @@ const CONFIG = {
         ES: "Spanish",
         ID: "Indonesian",
         FR: "French",
-        DE: "German"
+        DE: "German",
+        TH: "Thai",
+        AR: "Arabic",
+        PT: "Portuguese",
+        JA: "Japanese",
+        KO: "Korean",
+        VI: "Vietnamese",
+        TR: "Turkish",
+        HI: "Hindi",
+        IT: "Italian",
+        PL: "Polish",
+        NL: "Dutch",
+        SV: "Swedish",
+        UK: "Ukrainian",
+        FA: "Persian",
+        MS: "Malay"
     },
 
     // Flag emojis for each language.
@@ -61,7 +91,22 @@ const CONFIG = {
         ES: "🇪🇸",
         ID: "🇮🇩",
         FR: "🇫🇷",
-        DE: "🇩🇪"
+        DE: "🇩🇪",
+        TH: "🇹🇭",
+        AR: "🇸🇦",
+        PT: "🇵🇹",
+        JA: "🇯🇵",
+        KO: "🇰🇷",
+        VI: "🇻🇳",
+        TR: "🇹🇷",
+        HI: "🇮🇳",
+        IT: "🇮🇹",
+        PL: "🇵🇱",
+        NL: "🇳🇱",
+        SV: "🇸🇪",
+        UK: "🇺🇦",
+        FA: "🇮🇷",
+        MS: "🇲🇾"
     },
 
     // Channels where automatic translation is enabled.
