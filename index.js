@@ -117,7 +117,8 @@ const CONFIG = {
     // Channels where automatic translation is enabled.
     TRANSLATION_CHANNELS: [
         process.env.GENERAL_CHANNEL_ID,
-        process.env.PINGS_CHANNEL_ID
+        process.env.PINGS_CHANNEL_ID,
+        process.env.ALLY_CHAT_CHANNEL_ID
     ].filter(Boolean),
 
     // Restricted channels: only verified members can trigger
