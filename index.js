@@ -1925,7 +1925,10 @@ async function handleVerification(message) {
         .setColor(0xFEE75C)
         .setTitle("\u200B")
         .setAuthor({
-            name: message.author.username,
+            name:
+                (message.member &&
+                    message.member.displayName) ||
+                message.author.username,
             iconURL: message.author.displayAvatarURL()
         })
         .setDescription(
@@ -2050,9 +2053,14 @@ discordClient.on(
                             );
 
                         if (msg.embeds.length > 0) {
+                            const leaderName =
+                                (interaction.member &&
+                                    interaction.member.displayName) ||
+                                interaction.user.username;
+
                             await msg.edit({
                                 content:
-                                    `✅ **Verified** by ${interaction.user.username}`,
+                                    `✅ **Verified** by ${leaderName}`,
                                 embeds: [],
                                 components: []
                             });
@@ -2066,8 +2074,13 @@ discordClient.on(
                     targetUserId
                 );
 
+                const leaderName =
+                    (interaction.member &&
+                        interaction.member.displayName) ||
+                    interaction.user.username;
+
                 console.log(
-                    `✅ ${targetMember.user.username} verified by ${interaction.user.username} (${pending.size} screenshot(s))`
+                    `✅ ${targetMember.user.username} verified by ${leaderName} (${pending.size} screenshot(s))`
                 );
 
             } catch (error) {
@@ -2096,15 +2109,20 @@ discordClient.on(
                 }
             );
 
+            const leaderName =
+                (interaction.member &&
+                    interaction.member.displayName) ||
+                interaction.user.username;
+
             await interaction.update({
                 content:
-                    `❌ **Cancelled** by ${interaction.user.username}`,
+                    `❌ **Cancelled** by ${leaderName}`,
                 embeds: [],
                 components: []
             });
 
             console.log(
-                `❌ Verification cancelled by ${interaction.user.username}`
+                `❌ Verification cancelled by ${leaderName}`
             );
         }
     }
