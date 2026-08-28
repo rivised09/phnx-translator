@@ -1923,26 +1923,11 @@ async function handleVerification(message) {
     const row = new ActionRowBuilder()
         .addComponents(verifyButton, cancelButton);
 
-    const embed = new EmbedBuilder()
-        .setColor(0xFEE75C)
-        .setTitle("\u200B")
-        .setAuthor({
-            name:
-                (message.member &&
-                    message.member.displayName) ||
-                message.author.username,
-            iconURL: message.author.displayAvatarURL()
-        })
-        .setDescription(
-            `Account screenshot submitted for verification.`
-        )
-        .setImage(
-            message.attachments.first().url
-        );
-
     try {
-        const sent = await message.channel.send({
-            embeds: [embed],
+        const sent = await message.reply({
+            content:
+                "Account screenshot submitted for verification.",
+            allowedMentions: { parse: [] },
             components: [row]
         });
 
@@ -1957,12 +1942,125 @@ async function handleVerification(message) {
 
     } catch (error) {
         console.error(
-            "❌ Could not send verification prompt:",
+            "❌ Could not attach verification buttons:",
             error
         );
     }
 
     return true;
+}
+
+/**
+ * Backfill verify/cancel buttons for image messages that were
+ * already posted in the verification channel before the bot
+ * started. Attaches a button reply to each eligible message
+ * that does not already have one.
+ */
+async function backfillVerificationButtons(
+    readyClient
+) {
+    if (!CONFIG.VERIFICATION_CHANNEL_ID) return;
+
+    try {
+        const channel =
+            await readyClient.channels.fetch(
+                CONFIG.VERIFICATION_CHANNEL_ID
+            );
+
+        if (
+            !channel ||
+            !channel.isTextBased()
+        ) {
+            return;
+        }
+
+        const messages =
+            await channel.messages.fetch({
+                limit: 50
+            });
+
+        let attached = 0;
+
+        for (const message of messages.values()) {
+            // Skip bot messages and messages without images.
+            if (message.author.bot) continue;
+            if (!hasImageAttachment(message)) continue;
+
+            // Skip if this user already has a pending
+            // verification (avoid duplicate buttons).
+            const alreadyPending =
+                pendingVerifications.has(
+                    message.author.id
+                );
+
+            if (alreadyPending) continue;
+
+            const verifyButton =
+                new ButtonBuilder()
+                    .setCustomId(
+                        `verify_approve_${message.id}`
+                    )
+                    .setLabel("Verify")
+                    .setEmoji("✅")
+                    .setStyle(
+                        ButtonStyle.Success
+                    );
+
+            const cancelButton =
+                new ButtonBuilder()
+                    .setCustomId(
+                        `verify_cancel_${message.id}`
+                    )
+                    .setLabel("Cancel")
+                    .setEmoji("❌")
+                    .setStyle(
+                        ButtonStyle.Danger
+                    );
+
+            const row =
+                new ActionRowBuilder()
+                    .addComponents(
+                        verifyButton,
+                        cancelButton
+                    );
+
+            const sent =
+                await message.reply({
+                    content:
+                        "Account screenshot submitted for verification.",
+                    allowedMentions: {
+                        parse: []
+                    },
+                    components: [row]
+                });
+
+            if (
+                !pendingVerifications.has(
+                    message.author.id
+                )
+            ) {
+                pendingVerifications.set(
+                    message.author.id,
+                    new Set()
+                );
+            }
+
+            pendingVerifications
+                .get(message.author.id)
+                .add(sent.id);
+
+            attached++;
+        }
+
+        console.log(
+            `✅ Backfilled ${attached} verification button(s).`
+        );
+    } catch (error) {
+        console.error(
+            "⚠️ Verification backfill failed:",
+            error
+        );
+    }
 }
 
 // ============================================================
@@ -2054,19 +2152,16 @@ discordClient.on(
                                 pendingMsgId
                             );
 
-                        if (msg.embeds.length > 0) {
-                            const leaderName =
-                                (interaction.member &&
-                                    interaction.member.displayName) ||
-                                interaction.user.username;
+                        const leaderName =
+                            (interaction.member &&
+                                interaction.member.displayName) ||
+                            interaction.user.username;
 
-                            await msg.edit({
-                                content:
-                                    `✅ **Verified** by ${leaderName}`,
-                                embeds: [],
-                                components: []
-                            });
-                        }
+                        await msg.edit({
+                            content:
+                                `✅ **Verified** by ${leaderName}`,
+                            components: []
+                        });
                     } catch {
                         // Message may have been deleted.
                     }
@@ -2119,7 +2214,6 @@ discordClient.on(
             await interaction.update({
                 content:
                     `❌ **Cancelled** by ${leaderName}`,
-                embeds: [],
                 components: []
             });
 
@@ -2293,6 +2387,10 @@ discordClient.once(
             );
 
             await registerCommands();
+
+            await backfillVerificationButtons(
+                readyClient
+            );
 
             console.log(
                 "✅ Initialization complete."
