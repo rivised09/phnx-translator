@@ -128,7 +128,9 @@ const CONFIG = {
     //
     // To add more channels, just add their IDs to this array.
     RESTRICTED_CHANNELS: [
-        process.env.PERSONAL_PINGS_CHANNEL_ID
+        process.env.PERSONAL_PINGS_CHANNEL_ID,
+        process.env.WAR_ANNOUNCEMENTS_CHANNEL_ID,
+        process.env.EVENTS_ANNOUNCEMENTS_CHANNEL_ID
     ].filter(Boolean),
 
     // Public channels: for guests/unverified users.
