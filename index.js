@@ -13,7 +13,8 @@ const {
     ButtonBuilder,
     ButtonStyle,
     ContextMenuCommandBuilder,
-    ApplicationCommandType
+    ApplicationCommandType,
+    ActivityType
 } = require("discord.js");
 
 const { GoogleGenAI } = require("@google/genai");
@@ -2259,6 +2260,18 @@ discordClient.once(
         console.log(
             `Channels: ${CONFIG.TRANSLATION_CHANNELS.join(", ")}`
         );
+
+        try {
+            await readyClient.user.setActivity(
+                "We rise from the ashes",
+                { type: ActivityType.Custom }
+            );
+        } catch (error) {
+            console.error(
+                "⚠️ Could not set activity:",
+                error
+            );
+        }
         console.log(
             `Restricted: ${CONFIG.RESTRICTED_CHANNELS.join(", ") || "None"}`
         );
