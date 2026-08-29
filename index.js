@@ -1105,6 +1105,35 @@ async function translateForMember(text, targetLanguageCode) {
 }
 
 /**
+ * Determine whether a message contains actual translatable
+ * text. Returns false for pure emoji (unicode + custom), and
+ * for messages that only carry attachments/stickers/embeds
+ * with no text caption.
+ */
+function hasTranslatableText(message) {
+    const content =
+        (message.content || "").trim();
+
+    if (content.length === 0) return false;
+
+    // Remove custom emojis (<:name:id> and <a:name:id>).
+    let text = content.replace(
+        /<a?:\w+:\d+>/g,
+        ""
+    );
+
+    // Remove unicode emoji sequences (with skin tones,
+    // variation selectors and ZWJ joins) and whitespace.
+    const emojiRegex =
+        /(\p{Extended_Pictographic}(?:\u200d\p{Extended_Pictographic})*|\p{Extended_Pictographic}\uFE0F|\d\ufe0f\u20e3|\p{Emoji_Component}\uFE0F|\p{Emoji_Presentation})+[\uFE0F\u200d\u{E0100}-\u{E01EF}]*/gu;
+
+    text = text.replace(emojiRegex, "").trim();
+
+    // If any real word/character remains, it's translatable.
+    return text.length > 0;
+}
+
+/**
  * Attach a single "🌐 Translate" button to an eligible
  * message in the configured translation channels.
  */
@@ -1130,13 +1159,10 @@ async function attachTranslateButton(message) {
     if (!inTranslation && !inRestricted) return;
 
     // Only attach the button when there is actual text to
-    // translate. Pure emoji / image-without-caption / gif
-    // messages have no translatable content, so no button.
-    const hasText =
-        message.content &&
-        message.content.trim().length > 0;
-
-    if (!hasText) return;
+    // translate. Pure emoji / image-without-caption / gif /
+    // sticker-only messages have no translatable content, so
+    // no button.
+    if (!hasTranslatableText(message)) return;
 
     // Resolve the display name: prefer the server nickname,
     // falling back to the global username.
@@ -1154,11 +1180,13 @@ async function attachTranslateButton(message) {
         .addComponents(translateButton);
 
     try {
-        await message.reply({
+        const reply = await message.reply({
             content: `**${displayName}** · *English*`,
             allowedMentions: { parse: [] },
             components: [row]
         });
+
+        translateReplies.set(message.id, reply);
     } catch (error) {
         console.error(
             "❌ Could not attach translate button:",
@@ -1860,6 +1888,9 @@ const IMAGE_EXTENSIONS = [
 // userId -> Set of pending verification message IDs
 const pendingVerifications = new Map();
 
+// original message ID -> bot translate reply message
+const translateReplies = new Map();
+
 function hasImageAttachment(message) {
     if (!message.attachments || message.attachments.size === 0) {
         return false;
@@ -2161,6 +2192,34 @@ discordClient.on(
                 "❌ Message translation error:",
                 error
             );
+        }
+    }
+);
+
+// ============================================================
+// MESSAGE DELETE EVENT
+// ============================================================
+
+discordClient.on(
+    Events.MessageDelete,
+    async message => {
+        if (!message.id) return;
+
+        const reply = translateReplies.get(
+            message.id
+        );
+
+        if (!reply) return;
+
+        try {
+            await reply.delete();
+        } catch (error) {
+            console.error(
+                "❌ Could not delete translate reply:",
+                error
+            );
+        } finally {
+            translateReplies.delete(message.id);
         }
     }
 );
