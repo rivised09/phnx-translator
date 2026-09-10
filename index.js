@@ -268,6 +268,38 @@ function trimCache(cache, maximumSize) {
     }
 }
 
+/**
+ * Format a channel as a readable label for logs.
+ */
+function channelLabel(channel) {
+    if (!channel) return "unknown-channel";
+    return `#${channel.name || channel.id}`;
+}
+
+/**
+ * Format a user/member as a readable label for logs.
+ * Prefers the server nickname over the global username.
+ */
+function userLabel(user, member) {
+    if (member && member.displayName) {
+        return member.displayName;
+    }
+    if (user && user.username) {
+        return user.username;
+    }
+    return "unknown-user";
+}
+
+/**
+ * Truncate text for log previews (one line, no newlines).
+ */
+function previewText(text, maxLength = 60) {
+    const singleLine =
+        String(text || "").replace(/\s+/g, " ").trim();
+    if (singleLine.length <= maxLength) return singleLine;
+    return singleLine.slice(0, maxLength) + "…";
+}
+
 function normalizeRoleName(roleName) {
     return roleName
         .trim()
@@ -381,7 +413,7 @@ function rebuildLanguageCache(guild) {
     }
 
     console.log(
-        `🌐 Language cache rebuilt: ${userLanguageCache.size} members`
+        `🔄 Language cache rebuilt: ${userLanguageCache.size} members`
     );
 }
 
@@ -584,18 +616,23 @@ async function detectLanguage(text) {
 
 /**
  * Translate text using Gemini.
+ *
+ * Optional `cacheContext` is appended to the cache-hit log so
+ * traces contain the requester / channel (e.g. for monitoring).
  */
 async function translateText(
     text,
     sourceLanguage,
-    targetLanguage
+    targetLanguage,
+    cacheContext = ""
 ) {
     const cacheKey =
         `${sourceLanguage}|${targetLanguage}|${text}`;
 
     if (translationCache.has(cacheKey)) {
         console.log(
-            `💾 Cache hit: ${sourceLanguage} -> ${targetLanguage}`
+            `💾 Cache hit: ${sourceLanguage} -> ${targetLanguage}` +
+            (cacheContext ? ` [${cacheContext}]` : "")
         );
 
         return translationCache.get(cacheKey);
@@ -682,6 +719,12 @@ ${protectedData.text}
             trimCache(
                 translationCache,
                 CONFIG.CACHE_SIZE
+            );
+
+            console.log(
+                `✨ Translated: ${sourceLanguage} -> ${targetLanguage}` +
+                (cacheContext ? ` [${cacheContext}]` : "") +
+                `\n   Source: ${previewText(text)}`
             );
 
             return translated;
@@ -772,9 +815,17 @@ async function sendTranslation(
             botMessageIds.delete(sent.id);
         }, 10 * 60 * 1000);
 
+        console.log(
+            `✅ Public translation posted in ${channelLabel(message.channel)}: ` +
+            `${userLabel(message.author, message.member)} ` +
+            `(${sourceLanguageName} -> ${languageName}): ` +
+            `"${previewText(message.content)}"`
+        );
+
     } catch (error) {
         console.error(
-            "❌ Could not send translation:",
+            "❌ Could not send translation in " +
+            `${channelLabel(message.channel)}:`,
             error
         );
     }
@@ -839,7 +890,8 @@ async function determineTargetLanguages(
                     targetLang !== authorLanguageCode
                 ) {
                     console.log(
-                        `💬 Reply detected → translating to ${targetLang}`
+                        `💬 Reply detected in ${channelLabel(message.channel)} ` +
+                        `by ${message.author.username} → translating to ${targetLang}`
                     );
 
                     return new Set([targetLang]);
@@ -861,7 +913,8 @@ async function determineTargetLanguages(
                 repliedLang !== authorLanguageCode
             ) {
                 console.log(
-                    `💬 Reply to ${repliedMessage.author.username} → translating to ${repliedLang}`
+                    `💬 Reply to ${repliedMessage.author.username} in ${channelLabel(message.channel)} ` +
+                    `by ${message.author.username} → translating to ${repliedLang}`
                 );
 
                 return new Set([repliedLang]);
@@ -895,7 +948,8 @@ async function determineTargetLanguages(
                     targetLang !== authorLanguageCode
                 ) {
                     console.log(
-                        `📡 Context from recent message → translating to ${targetLang}`
+                        `📡 Context from recent message in ${channelLabel(message.channel)} ` +
+                        `for ${message.author.username} → translating to ${targetLang}`
                     );
 
                     return new Set([targetLang]);
@@ -961,8 +1015,13 @@ async function handlePublicChat(message) {
     const sourceLanguage =
         getLanguageName(sourceLanguageCode);
 
+    const authorLabel =
+        userLabel(message.author, message.member);
+
     console.log(
-        `🌍 Public chat: ${message.author.username} (${sourceLanguage})`
+        `🌍 Public chat in ${channelLabel(message.channel)}: ` +
+        `${authorLabel} wrote in ${sourceLanguage}: ` +
+        `"${previewText(message.content)}"`
     );
 
     try {
@@ -970,7 +1029,8 @@ async function handlePublicChat(message) {
             await translateText(
                 message.content,
                 sourceLanguage,
-                "English"
+                "English",
+                `public ${authorLabel} in ${channelLabel(message.channel)}`
             );
 
         if (
@@ -978,6 +1038,10 @@ async function handlePublicChat(message) {
             translated.trim() ===
                 message.content.trim()
         ) {
+            console.log(
+                `ℹ️ Public chat: ${authorLabel}'s ${sourceLanguage} message ` +
+                `had nothing to translate in ${channelLabel(message.channel)}`
+            );
             return true;
         }
 
@@ -989,7 +1053,7 @@ async function handlePublicChat(message) {
         );
     } catch (error) {
         console.error(
-            `❌ Translation failed: ${sourceLanguage} -> English`,
+            `❌ Translation failed for ${authorLabel}: ${sourceLanguage} -> English`,
             error
         );
     }
@@ -1034,11 +1098,18 @@ async function handleRestrictedChannel(message) {
 
     if (!hasRole) {
         console.log(
-            `🔒 ${message.author.username} is not verified in restricted channel.`
+            `🔒 ${userLabel(message.author, message.member)} is NOT verified ` +
+            `in restricted channel ${channelLabel(message.channel)}: ` +
+            `"${previewText(message.content)}"`
         );
 
         return true;
     }
+
+    console.log(
+        `🔓 Verified ${userLabel(message.author, message.member)} posted ` +
+        `in restricted channel ${channelLabel(message.channel)}`
+    );
 
     // Restricted channels use the same private translate
     // button as the general channels.
@@ -1060,7 +1131,7 @@ async function handleRestrictedChannel(message) {
  * Returns an object:
  *   { needed: bool, code: string, name: string, text: string }
  */
-async function translateForMember(text, targetLanguageCode) {
+async function translateForMember(text, targetLanguageCode, cacheContext = "") {
     const targetLanguage =
         getLanguageName(targetLanguageCode);
 
@@ -1093,7 +1164,8 @@ async function translateForMember(text, targetLanguageCode) {
         await translateText(
             text,
             sourceLanguage,
-            targetLanguage
+            targetLanguage,
+            cacheContext
         );
 
     return {
@@ -1187,6 +1259,12 @@ async function attachTranslateButton(message) {
         });
 
         translateReplies.set(message.id, reply);
+
+        console.log(
+            `🔘 Attached translate button in ${channelLabel(message.channel)} ` +
+            `for ${userLabel(message.author, message.member)}: ` +
+            `"${previewText(message.content)}"`
+        );
     } catch (error) {
         console.error(
             "❌ Could not attach translate button:",
@@ -1229,7 +1307,15 @@ async function sendPrivateTranslation(interaction, targetMessage) {
         userLanguageCache.get(interaction.user.id) ||
         getMemberLanguageCode(member);
 
+    const requesterLabel =
+        userLabel(interaction.user, member || interaction.member);
+
     if (!languageCode) {
+        console.log(
+            `❌ ${requesterLabel} has no language role — ` +
+            `could not translate in ${channelLabel(interaction.channel)}`
+        );
+
         return {
             error: "❌ You don't have a language role set. " +
                 "Please pick your language during onboarding."
@@ -1265,10 +1351,16 @@ async function sendPrivateTranslation(interaction, targetMessage) {
         const result =
             await translateForMember(
                 targetMessage.content,
-                languageCode
+                languageCode,
+                `private ${requesterLabel} in ${channelLabel(interaction.channel)}`
             );
 
         if (!result.needed) {
+            console.log(
+                `ℹ️ ${requesterLabel}: message by ${targetMessage.author.username} ` +
+                `already in ${languageName} — skipped in ${channelLabel(interaction.channel)}`
+            );
+
             return {
                 content:
                     `ℹ️ That message is already in **${languageName}** — ` +
@@ -1281,11 +1373,23 @@ async function sendPrivateTranslation(interaction, targetMessage) {
             result.text.trim() ===
                 targetMessage.content.trim()
         ) {
+            console.log(
+                `ℹ️ ${requesterLabel}: nothing to translate ` +
+                `into ${languageName} in ${channelLabel(interaction.channel)}`
+            );
+
             return {
                 content:
                     `ℹ️ Nothing to translate into **${languageName}**.`
             };
         }
+
+        console.log(
+            `✅ ${requesterLabel} got a private translation ` +
+            `(${languageName}) in ${channelLabel(interaction.channel)} ` +
+            `for ${targetMessage.author.username}: ` +
+            `"${previewText(targetMessage.content)}"`
+        );
 
         return {
             content:
@@ -1315,6 +1419,15 @@ async function handleTranslateButton(interaction) {
     const messageId = interaction.customId.replace(
         "translate_",
         ""
+    );
+
+    const requesterLabel =
+        userLabel(interaction.user, interaction.member);
+
+    console.log(
+        `🖱️ ${requesterLabel} clicked Translate button in ` +
+        `${channelLabel(interaction.channel)} ` +
+        `(message ${messageId})`
     );
 
     // Reply is deferred because translation can exceed
@@ -1359,6 +1472,10 @@ async function handleTranslateButton(interaction) {
         );
 
     if (result.error) {
+        console.log(
+            `❌ ${requesterLabel}'s button translate failed: ${result.error}`
+        );
+
         await interaction.editReply({
             content: result.error
         });
@@ -1411,7 +1528,8 @@ async function handleTranslation(message) {
 
     if (!authorLanguageCode) {
         console.log(
-            `ℹ️ ${member.user.username} has no language role.`
+            `ℹ️ ${member.user.username} has no language role ` +
+            `in ${channelLabel(message.channel)}.`
         );
 
         return;
@@ -1433,14 +1551,20 @@ async function handleTranslation(message) {
 
     if (languagesPresent.size === 0) {
         console.log(
-            "ℹ️ No other language groups need translation."
+            `ℹ️ No other language groups need translation ` +
+            `for ${member.user.username} in ${channelLabel(message.channel)}.`
         );
 
         return;
     }
 
+    const authorLabel =
+        userLabel(message.author, member);
+
     console.log(
-        `🌐 ${member.user.username} (${sourceLanguage})`
+        `🌐 ${authorLabel} wrote in ${sourceLanguage} ` +
+        `in ${channelLabel(message.channel)}: ` +
+        `"${previewText(message.content)}"`
     );
 
     console.log(
@@ -1465,7 +1589,8 @@ async function handleTranslation(message) {
                 await translateText(
                     message.content,
                     sourceLanguage,
-                    targetLanguage
+                    targetLanguage,
+                    `auto ${authorLabel} in ${channelLabel(message.channel)}`
                 );
 
             if (
@@ -1486,7 +1611,7 @@ async function handleTranslation(message) {
 
         } catch (error) {
             console.error(
-                `❌ Translation failed: ${sourceLanguage} -> ${targetLanguage}`,
+                `❌ Translation failed for ${authorLabel}: ${sourceLanguage} -> ${targetLanguage}`,
                 error
             );
         }
@@ -1529,6 +1654,13 @@ async function handleTranslation(message) {
         setTimeout(() => {
             botMessageIds.delete(sent.id);
         }, 10 * 60 * 1000);
+
+        console.log(
+            `✅ Auto-translation posted in ${channelLabel(message.channel)} ` +
+            `for ${authorLabel} (${sourceLanguage} -> ` +
+            `${translations.map(t => t.name).join(", ")}): ` +
+            `"${previewText(message.content)}"`
+        );
 
     } catch (error) {
         console.error(
@@ -1641,6 +1773,16 @@ discordClient.on(
             const targetMessage =
                 interaction.targetMessage;
 
+            const requesterLabel =
+                userLabel(interaction.user, interaction.member);
+
+            console.log(
+                `📋 ${requesterLabel} used 🌐 Translate on ` +
+                `${targetMessage.author.username}'s message in ` +
+                `${channelLabel(interaction.channel)}: ` +
+                `"${previewText(targetMessage.content)}"`
+            );
+
             if (
                 !targetMessage.content ||
                 !targetMessage.content.trim()
@@ -1681,6 +1823,9 @@ discordClient.on(
 
         if (interaction.commandName === "language") {
 
+            const requesterLabel =
+                userLabel(interaction.user, interaction.member);
+
             const languageCode =
                 userLanguageCache.get(
                     interaction.user.id
@@ -1691,6 +1836,10 @@ discordClient.on(
 
             if (!languageCode) {
 
+                console.log(
+                    `⌨️ /language by ${requesterLabel}: no language role set`
+                );
+
                 await interaction.reply({
                     content:
                         "❌ You don't currently have a supported language role.",
@@ -1699,6 +1848,11 @@ discordClient.on(
 
                 return;
             }
+
+            console.log(
+                `⌨️ /language by ${requesterLabel}: ` +
+                `${languageCode} (${getLanguageName(languageCode)})`
+            );
 
             await interaction.reply({
                 content:
@@ -1715,6 +1869,9 @@ discordClient.on(
 
         if (interaction.commandName === "translate") {
 
+            const requesterLabel =
+                userLabel(interaction.user, interaction.member);
+
             const languageCode =
                 interaction.options
                     .getString("language")
@@ -1729,6 +1886,10 @@ discordClient.on(
                     languageCode
                 ]
             ) {
+                console.log(
+                    `⌨️ /translate by ${requesterLabel}: unsupported language "${languageCode}"`
+                );
+
                 await interaction.reply({
                     content:
                         `❌ Unsupported language code: \`${languageCode}\`\n\n` +
@@ -1753,8 +1914,14 @@ discordClient.on(
                         "the detected source language",
                         getLanguageName(
                             languageCode
-                        )
+                        ),
+                        `slash by ${requesterLabel}`
                     );
+
+                console.log(
+                    `⌨️ /translate by ${requesterLabel} -> ${languageCode}: ` +
+                    `"${previewText(text)}"`
+                );
 
                 await interaction.editReply({
                     content:
@@ -1762,6 +1929,11 @@ discordClient.on(
                 });
 
             } catch (error) {
+
+                console.error(
+                    `❌ /translate failed for ${requesterLabel} -> ${languageCode}:`,
+                    error.message || error
+                );
 
                 await interaction.editReply({
                     content:
@@ -1798,6 +1970,11 @@ discordClient.on(
 
                 rebuildLanguageCache(
                     interaction.guild
+                );
+
+                console.log(
+                    `🔄 /reload by ${userLabel(interaction.user, interaction.member)}: ` +
+                    `cache rebuilt (${userLanguageCache.size} members)`
                 );
 
                 await interaction.reply({
@@ -1974,6 +2151,11 @@ async function handleVerification(message) {
 
         pendingVerifications.get(userId).add(sent.id);
 
+        console.log(
+            `📸 ${userLabel(message.author, message.member)} ` +
+            `submitted a verification screenshot in ${channelLabel(message.channel)}`
+        );
+
     } catch (error) {
         console.error(
             "❌ Could not attach verification buttons:",
@@ -2013,6 +2195,12 @@ discordClient.on(
 
         // Only leadership can use these buttons.
         if (!hasLeadershipRole(interaction.member)) {
+            console.log(
+                `⛔ ${userLabel(interaction.user, interaction.member)} ` +
+                `tried to use a verify button in ${channelLabel(interaction.channel)} ` +
+                `(no leadership role)`
+            );
+
             await interaction.reply({
                 content:
                     "❌ Only leadership can use this button.",
@@ -2098,7 +2286,8 @@ discordClient.on(
                     interaction.user.username;
 
                 console.log(
-                    `✅ ${targetMember.user.username} verified by ${leaderName} (${pending.size} screenshot(s))`
+                    `✅ ${userLabel(targetMember.user, targetMember)} verified by ` +
+                    `${leaderName} (${pending.size} screenshot(s))`
                 );
 
             } catch (error) {
@@ -2139,7 +2328,8 @@ discordClient.on(
             });
 
             console.log(
-                `❌ Verification cancelled by ${leaderName}`
+                `❌ Verification cancelled by ${leaderName} ` +
+                `in ${channelLabel(interaction.channel)}`
             );
         }
     }
@@ -2252,10 +2442,8 @@ discordClient.on(
             }
 
             console.log(
-                `🌐 ${newMember.user.username}: ` +
-                `${oldLanguage || "none"} -> ${
-                    newLanguage || "none"
-                }`
+                `🎭 Role change: ${userLabel(newMember.user, newMember)} ` +
+                `language ${oldLanguage || "none"} -> ${newLanguage || "none"}`
             );
         }
     }
