@@ -149,6 +149,11 @@ const CONFIG = {
     // leave this empty in .env.
     VERIFIED_ROLE_ID: process.env.VERIFIED_ROLE_ID || "",
 
+    // Role that indicates a freshly joined member who has not
+    // yet verified. Used to send a DM reminder after onboarding
+    // picks a language role.
+    NEW_MEMBER_ROLE_ID: process.env.NEW_MEMBER_ROLE_ID || "",
+
     // Verification channel: users post account screenshots.
     // Leadership can approve or cancel.
     VERIFICATION_CHANNEL_ID: process.env.VERIFICATION_CHANNEL_ID || "",
@@ -2065,6 +2070,9 @@ const IMAGE_EXTENSIONS = [
 // userId -> Set of pending verification message IDs
 const pendingVerifications = new Map();
 
+// user IDs that already received the verification DM reminder
+const verificationDmSent = new Set();
+
 // original message ID -> bot translate reply message
 const translateReplies = new Map();
 
@@ -2106,6 +2114,93 @@ function hasLeadershipRole(member) {
     return member.roles.cache.has(
         CONFIG.LEADERSHIP_ROLE_ID
     );
+}
+
+/**
+ * Send a private verification reminder DM to a member. The
+ * message is translated into the member's selected language
+ * and includes a button link to the verification channel.
+ */
+async function sendVerificationReminder(member) {
+    const languageCode =
+        userLanguageCache.get(member.id) ||
+        getMemberLanguageCode(member);
+
+    if (!languageCode) return null;
+
+    const channelMention = CONFIG.VERIFICATION_CHANNEL_ID
+        ? `<#${CONFIG.VERIFICATION_CHANNEL_ID}>`
+        : "`#verification`";
+
+    const baseText = [
+        "# 🔔 Welcome to **Phoenix of War!** 🐦‍🔥",
+        "",
+        "Hey! Welcome to **PHW**. Before you can access the rest of the server, we just need to verify your in-game account.",
+        "",
+        "## 📸 How to Verify",
+        "",
+        `Please send a **screenshot of your in-game profile** in ${channelMention}.`,
+        "",
+        "Make sure your **name, server, and profile information** are visible so we can verify your account.",
+        "",
+        "Once you're verified, you'll get access to the rest of the server. ❤️",
+        "",
+        "**Thanks for joining Phoenix of War, and welcome!** 🐦‍🔥"
+    ].join("\n");
+
+    let messageText = baseText;
+
+    try {
+        const result = await translateForMember(
+            baseText,
+            languageCode,
+            `verification DM for ${member.user.username}`
+        );
+
+        if (result.needed && result.text) {
+            messageText = result.text;
+        }
+    } catch (error) {
+        console.error(
+            "❌ Could not translate verification reminder:",
+            error
+        );
+    }
+
+    const channelUrl = CONFIG.VERIFICATION_CHANNEL_ID
+        ? `https://discord.com/channels/${member.guild.id}/${CONFIG.VERIFICATION_CHANNEL_ID}`
+        : null;
+
+    const row = new ActionRowBuilder()
+        .addComponents(
+            new ButtonBuilder()
+                .setLabel("Go to Verification")
+                .setStyle(ButtonStyle.Link)
+                .setURL(
+                    channelUrl ||
+                        "https://discord.com"
+                )
+        );
+
+    try {
+        await member.send({
+            content: messageText,
+            components: channelUrl ? [row] : []
+        });
+
+        console.log(
+            `📩 Verification DM sent to ` +
+            `${userLabel(member.user, member)} (${languageCode})`
+        );
+
+        return languageCode;
+    } catch (error) {
+        console.error(
+            `❌ Could not DM verification reminder to ${member.user.username}:`,
+            error
+        );
+        return null;
+    }
 }
 
 async function handleVerification(message) {
@@ -2420,7 +2515,7 @@ discordClient.on(
 
 discordClient.on(
     Events.GuildMemberUpdate,
-    (oldMember, newMember) => {
+    async (oldMember, newMember) => {
 
         const oldLanguage =
             getMemberLanguageCode(oldMember);
@@ -2445,6 +2540,41 @@ discordClient.on(
                 `🎭 Role change: ${userLabel(newMember.user, newMember)} ` +
                 `language ${oldLanguage || "none"} -> ${newLanguage || "none"}`
             );
+
+            // After onboarding (a language role was picked),
+            // send the verification reminder DM if the member
+            // still has the New Member role and is NOT yet
+            // verified. Verified users also keep the New Member
+            // role, so we must ensure they aren't verified.
+            if (
+                newLanguage &&
+                CONFIG.NEW_MEMBER_ROLE_ID &&
+                (
+                    !CONFIG.VERIFIED_ROLE_ID ||
+                    !newMember.roles.cache.has(
+                        CONFIG.VERIFIED_ROLE_ID
+                    )
+                ) &&
+                newMember.roles.cache.has(
+                    CONFIG.NEW_MEMBER_ROLE_ID
+                ) &&
+                !verificationDmSent.has(newMember.id)
+            ) {
+                verificationDmSent.add(
+                    newMember.id
+                );
+
+                try {
+                    await sendVerificationReminder(
+                        newMember
+                    );
+                } catch (error) {
+                    console.error(
+                        "❌ Verification reminder failed:",
+                        error
+                    );
+                }
+            }
         }
     }
 );
