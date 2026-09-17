@@ -1416,7 +1416,11 @@ async function backfillForumPost(thread) {
  * channels and categories. Text channels and thread replies
  * are intentionally ignored.
  */
-async function backfillForumPosts(guild, includeArchived = false) {
+async function backfillForumPosts(
+    guild,
+    includeArchived = false,
+    targetChannel = null
+) {
     const summary = {
         forums: 0,
         posts: 0,
@@ -1426,21 +1430,50 @@ async function backfillForumPosts(guild, includeArchived = false) {
 
     if (!guild) return summary;
 
-    const forums = guild.channels.cache.filter(
-        channel =>
-            (channel.type === ChannelType.GuildForum ||
-                channel.type === ChannelType.GuildMedia) &&
-            (channelIsConfigured(
-                channel,
-                CONFIG.TRANSLATION_CHANNELS,
-                CONFIG.TRANSLATION_CATEGORIES
-            ) ||
-                channelIsConfigured(
+    const isForum = channel =>
+        channel &&
+        (channel.type === ChannelType.GuildForum ||
+            channel.type === ChannelType.GuildMedia);
+
+    let forums;
+
+    if (targetChannel) {
+        const target =
+            guild.channels.cache.get(targetChannel.id) ||
+            targetChannel;
+
+        if (isForum(target)) {
+            forums = [target];
+        } else if (
+            target.type === ChannelType.GuildCategory
+        ) {
+            forums = guild.channels.cache.filter(
+                channel =>
+                    isForum(channel) &&
+                    channel.parentId === target.id
+            );
+        } else {
+            console.log(
+                `⚠️ Backfill target ${channelLabel(target)} is not a forum or category.`
+            );
+            forums = [];
+        }
+    } else {
+        forums = guild.channels.cache.filter(
+            channel =>
+                isForum(channel) &&
+                (channelIsConfigured(
                     channel,
-                    CONFIG.RESTRICTED_CHANNELS,
-                    CONFIG.RESTRICTED_CATEGORIES
-                ))
-    );
+                    CONFIG.TRANSLATION_CHANNELS,
+                    CONFIG.TRANSLATION_CATEGORIES
+                ) ||
+                    channelIsConfigured(
+                        channel,
+                        CONFIG.RESTRICTED_CHANNELS,
+                        CONFIG.RESTRICTED_CATEGORIES
+                    ))
+        );
+    }
 
     for (const [, forum] of forums) {
         summary.forums++;
@@ -1962,6 +1995,14 @@ const commands = [
         .setDefaultMemberPermissions(
             PermissionFlagsBits.ManageGuild
         )
+        .addChannelOption(option =>
+            option
+                .setName("channel")
+                .setDescription(
+                    "Specific forum (or category) to backfill. Omit to use configured channels/categories."
+                )
+                .setRequired(false)
+        )
         .addBooleanOption(option =>
             option
                 .setName("include_archived")
@@ -2351,12 +2392,18 @@ discordClient.on(
                         "include_archived"
                     ) || false;
 
+                const targetChannel =
+                    interaction.options.getChannel(
+                        "channel"
+                    );
+
                 // Make sure every channel is cached.
                 await interaction.guild.channels.fetch();
 
                 const summary = await backfillForumPosts(
                     interaction.guild,
-                    includeArchived
+                    includeArchived,
+                    targetChannel
                 );
 
                 console.log(
@@ -2372,6 +2419,9 @@ discordClient.on(
                         `Posts scanned: **${summary.posts}**\n` +
                         `Buttons added: **${summary.added}**\n` +
                         `Skipped (already had button / no text): **${summary.skipped}**` +
+                        (targetChannel
+                            ? `\n\n_Target: <#${targetChannel.id}>_`
+                            : "") +
                         (includeArchived
                             ? ""
                             : `\n\n_Archived posts were skipped. Re-run with \`include_archived: true\` to include them._`)
