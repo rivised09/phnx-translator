@@ -23,6 +23,17 @@ const { GoogleGenAI } = require("@google/genai");
 // CONFIGURATION
 // ============================================================
 
+/**
+ * Parse a comma-separated list of Discord IDs from an env var.
+ * Returns an empty array when unset.
+ */
+function parseIdList(value) {
+    return String(value || "")
+        .split(",")
+        .map(id => id.trim())
+        .filter(Boolean);
+}
+
 const CONFIG = {
     // Gemini model
     GEMINI_MODEL: "gemini-3.1-flash-lite",
@@ -142,6 +153,28 @@ const CONFIG = {
     PUBLIC_CHAT_CHANNELS: [
         process.env.PUBLIC_CHAT_CHANNEL_ID
     ].filter(Boolean),
+
+    // Category IDs (comma-separated in .env). Every channel
+    // AND every forum post under these categories behaves like
+    // a TRANSLATION_CHANNEL.
+    //
+    // Example .env:
+    //   TRANSLATION_CATEGORY_IDS=111111111111111111,222222222222222222
+    TRANSLATION_CATEGORIES: parseIdList(
+        process.env.TRANSLATION_CATEGORY_IDS
+    ),
+
+    // Category IDs whose channels/forums behave like
+    // RESTRICTED_CHANNELS (verified members only).
+    RESTRICTED_CATEGORIES: parseIdList(
+        process.env.RESTRICTED_CATEGORY_IDS
+    ),
+
+    // Category IDs whose channels/forums behave like
+    // PUBLIC_CHAT_CHANNELS.
+    PUBLIC_CHAT_CATEGORIES: parseIdList(
+        process.env.PUBLIC_CHAT_CATEGORY_IDS
+    ),
 
     // Role that indicates the member is verified.
     //
@@ -279,6 +312,50 @@ function trimCache(cache, maximumSize) {
 function channelLabel(channel) {
     if (!channel) return "unknown-channel";
     return `#${channel.name || channel.id}`;
+}
+
+/**
+ * Check whether a channel is covered by a configuration list.
+ *
+ * Supports matching by:
+ *  - direct channel ID
+ *  - forum channel ID (for posts inside that forum)
+ *  - category ID (every channel AND forum post under it)
+ *
+ * Forum posts and text threads are resolved to their parent
+ * channel first, so a category match still applies inside them.
+ */
+function channelIsConfigured(
+    channel,
+    channelList = [],
+    categoryList = []
+) {
+    if (!channel) return false;
+
+    // Resolve threads (including forum posts) to the channel
+    // that contains them.
+    const parentChannel =
+        typeof channel.isThread === "function" && channel.isThread()
+            ? channel.parent
+            : channel;
+
+    // Direct channel or parent-forum match.
+    if (channelList.includes(channel.id)) return true;
+    if (parentChannel && channelList.includes(parentChannel.id)) {
+        return true;
+    }
+
+    // Category match (category of the channel, or of the forum
+    // a post lives in).
+    if (
+        parentChannel &&
+        parentChannel.parentId &&
+        categoryList.includes(parentChannel.parentId)
+    ) {
+        return true;
+    }
+
+    return false;
 }
 
 /**
@@ -523,7 +600,13 @@ function shouldIgnoreMessage(message) {
     if (botMessageIds.has(message.id)) return true;
 
     // Wrong channel
-    if (!CONFIG.TRANSLATION_CHANNELS.includes(message.channel.id)) {
+    if (
+        !channelIsConfigured(
+            message.channel,
+            CONFIG.TRANSLATION_CHANNELS,
+            CONFIG.TRANSLATION_CATEGORIES
+        )
+    ) {
         return true;
     }
 
@@ -987,8 +1070,10 @@ async function determineTargetLanguages(
  */
 async function handlePublicChat(message) {
     if (
-        !CONFIG.PUBLIC_CHAT_CHANNELS.includes(
-            message.channel.id
+        !channelIsConfigured(
+            message.channel,
+            CONFIG.PUBLIC_CHAT_CHANNELS,
+            CONFIG.PUBLIC_CHAT_CATEGORIES
         )
     ) {
         return false;
@@ -1073,8 +1158,10 @@ async function handlePublicChat(message) {
  */
 async function handleRestrictedChannel(message) {
     if (
-        !CONFIG.RESTRICTED_CHANNELS.includes(
-            message.channel.id
+        !channelIsConfigured(
+            message.channel,
+            CONFIG.RESTRICTED_CHANNELS,
+            CONFIG.RESTRICTED_CATEGORIES
         )
     ) {
         return false;
@@ -1223,15 +1310,18 @@ async function attachTranslateButton(message) {
     if (message.webhookId) return;
     if (botMessageIds.has(message.id)) return;
 
-    // Only in translation or restricted channels.
-    const inTranslation =
-        CONFIG.TRANSLATION_CHANNELS.includes(
-            message.channel.id
-        );
-    const inRestricted =
-        CONFIG.RESTRICTED_CHANNELS.includes(
-            message.channel.id
-        );
+    // Only in translation or restricted channels (or the
+    // categories configured to behave like them).
+    const inTranslation = channelIsConfigured(
+        message.channel,
+        CONFIG.TRANSLATION_CHANNELS,
+        CONFIG.TRANSLATION_CATEGORIES
+    );
+    const inRestricted = channelIsConfigured(
+        message.channel,
+        CONFIG.RESTRICTED_CHANNELS,
+        CONFIG.RESTRICTED_CATEGORIES
+    );
 
     if (!inTranslation && !inRestricted) return;
 
@@ -2032,6 +2122,21 @@ discordClient.on(
                     .map(id => `<#${id}>`)
                     .join(", ");
 
+            const translationCategoryList =
+                CONFIG.TRANSLATION_CATEGORIES
+                    .map(id => `<#${id}>`)
+                    .join(", ");
+
+            const restrictedCategoryList =
+                CONFIG.RESTRICTED_CATEGORIES
+                    .map(id => `<#${id}>`)
+                    .join(", ");
+
+            const publicCategoryList =
+                CONFIG.PUBLIC_CHAT_CATEGORIES
+                    .map(id => `<#${id}>`)
+                    .join(", ");
+
             await interaction.reply({
                 content:
                     `🐦‍🔥 **973 Translator Status**\n\n` +
@@ -2048,8 +2153,11 @@ discordClient.on(
                         "None"
                     }**\n` +
                     `Translation channels: ${channelList || "None"}\n` +
+                    `Translation categories: ${translationCategoryList || "None"}\n` +
                     `Restricted channels: ${restrictedList || "None"}\n` +
+                    `Restricted categories: ${restrictedCategoryList || "None"}\n` +
                     `Public chat channels: ${publicList || "None"}\n` +
+                    `Public chat categories: ${publicCategoryList || "None"}\n` +
                     `Translation cache: **${translationCache.size}**`,
                 flags: 64
             });
