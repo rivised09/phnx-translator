@@ -1301,36 +1301,42 @@ function hasTranslatableText(message) {
 /**
  * Attach a single "🌐 Translate" button to an eligible
  * message in the configured translation channels.
+ *
+ * Pass `force = true` to skip the channel/category config
+ * check (used when a specific message is targeted manually).
+ * Returns true when a button was posted.
  */
-async function attachTranslateButton(message) {
-    if (!message) return;
-    if (!message.channel) return;
+async function attachTranslateButton(message, force = false) {
+    if (!message) return false;
+    if (!message.channel) return false;
 
     // Bot / webhook / bot-translation messages are never eligible.
-    if (message.author.bot) return;
-    if (message.webhookId) return;
-    if (botMessageIds.has(message.id)) return;
+    if (message.author.bot) return false;
+    if (message.webhookId) return false;
+    if (botMessageIds.has(message.id)) return false;
 
-    // Only in translation or restricted channels (or the
-    // categories configured to behave like them).
-    const inTranslation = channelIsConfigured(
-        message.channel,
-        CONFIG.TRANSLATION_CHANNELS,
-        CONFIG.TRANSLATION_CATEGORIES
-    );
-    const inRestricted = channelIsConfigured(
-        message.channel,
-        CONFIG.RESTRICTED_CHANNELS,
-        CONFIG.RESTRICTED_CATEGORIES
-    );
+    if (!force) {
+        // Only in translation or restricted channels (or the
+        // categories configured to behave like them).
+        const inTranslation = channelIsConfigured(
+            message.channel,
+            CONFIG.TRANSLATION_CHANNELS,
+            CONFIG.TRANSLATION_CATEGORIES
+        );
+        const inRestricted = channelIsConfigured(
+            message.channel,
+            CONFIG.RESTRICTED_CHANNELS,
+            CONFIG.RESTRICTED_CATEGORIES
+        );
 
-    if (!inTranslation && !inRestricted) return;
+        if (!inTranslation && !inRestricted) return false;
+    }
 
     // Only attach the button when there is actual text to
     // translate. Pure emoji / image-without-caption / gif /
     // sticker-only messages have no translatable content, so
     // no button.
-    if (!hasTranslatableText(message)) return;
+    if (!hasTranslatableText(message)) return false;
 
     // Resolve the display name: prefer the server nickname,
     // falling back to the global username.
@@ -1361,30 +1367,28 @@ async function attachTranslateButton(message) {
             `for ${userLabel(message.author, message.member)}: ` +
             `"${previewText(message.content)}"`
         );
+
+        return true;
     } catch (error) {
         console.error(
             "❌ Could not attach translate button:",
             error
         );
+
+        return false;
     }
 }
 
 /**
- * Attach a translate button to a single forum post's starter
- * message. Returns true when a new button was added.
+ * Check whether the bot already posted a translate button
+ * reply for the given message in a channel.
  */
-async function backfillForumPost(thread) {
-    const starter = await thread.fetchStarterMessage();
-
-    if (!starter) return false;
-    if (!hasTranslatableText(starter)) return false;
-
-    // Skip posts that already have a button reply from us.
-    const existing = await thread.messages.fetch({
+async function hasTranslateButtonReply(channel, messageId) {
+    const recent = await channel.messages.fetch({
         limit: 100
     });
 
-    const alreadyHasButton = existing.some(message => {
+    return recent.some(message => {
         if (
             !discordClient.user ||
             message.author.id !== discordClient.user.id
@@ -1398,16 +1402,28 @@ async function backfillForumPost(thread) {
                 row.components.some(
                     component =>
                         component.customId ===
-                        `translate_${starter.id}`
+                        `translate_${messageId}`
                 )
         );
     });
+}
 
-    if (alreadyHasButton) return false;
+/**
+ * Attach a translate button to a single forum post's starter
+ * message. Returns true when a new button was added.
+ */
+async function backfillForumPost(thread) {
+    const starter = await thread.fetchStarterMessage();
 
-    await attachTranslateButton(starter);
+    if (!starter) return false;
+    if (!hasTranslatableText(starter)) return false;
 
-    return true;
+    // Skip posts that already have a button reply from us.
+    if (await hasTranslateButtonReply(thread, starter.id)) {
+        return false;
+    }
+
+    return await attachTranslateButton(starter);
 }
 
 /**
@@ -1447,11 +1463,15 @@ async function backfillForumPosts(
         } else if (
             target.type === ChannelType.GuildCategory
         ) {
-            forums = guild.channels.cache.filter(
-                channel =>
-                    isForum(channel) &&
-                    channel.parentId === target.id
-            );
+            forums = [
+                ...guild.channels.cache
+                    .filter(
+                        channel =>
+                            isForum(channel) &&
+                            channel.parentId === target.id
+                    )
+                    .values()
+            ];
         } else {
             console.log(
                 `⚠️ Backfill target ${channelLabel(target)} is not a forum or category.`
@@ -1459,23 +1479,27 @@ async function backfillForumPosts(
             forums = [];
         }
     } else {
-        forums = guild.channels.cache.filter(
-            channel =>
-                isForum(channel) &&
-                (channelIsConfigured(
-                    channel,
-                    CONFIG.TRANSLATION_CHANNELS,
-                    CONFIG.TRANSLATION_CATEGORIES
-                ) ||
-                    channelIsConfigured(
-                        channel,
-                        CONFIG.RESTRICTED_CHANNELS,
-                        CONFIG.RESTRICTED_CATEGORIES
-                    ))
-        );
+        forums = [
+            ...guild.channels.cache
+                .filter(
+                    channel =>
+                        isForum(channel) &&
+                        (channelIsConfigured(
+                            channel,
+                            CONFIG.TRANSLATION_CHANNELS,
+                            CONFIG.TRANSLATION_CATEGORIES
+                        ) ||
+                            channelIsConfigured(
+                                channel,
+                                CONFIG.RESTRICTED_CHANNELS,
+                                CONFIG.RESTRICTED_CATEGORIES
+                            ))
+                )
+                .values()
+        ];
     }
 
-    for (const [, forum] of forums) {
+    for (const forum of forums) {
         summary.forums++;
 
         const threads = new Map();
@@ -1539,6 +1563,101 @@ async function backfillForumPosts(
     }
 
     return summary;
+}
+
+/**
+ * Attach a translate button to one specific message by ID.
+ *
+ * `channel` is where to look: a thread, text channel, or a
+ * forum channel (in which case the ID must be a post/thread
+ * ID, which equals its starter message ID).
+ *
+ * Returns { ok, content } for the interaction reply.
+ */
+async function backfillSingleMessage(channel, messageId) {
+    if (!channel) {
+        return {
+            ok: false,
+            content:
+                "❌ Could not determine the channel. Pass the `channel` option."
+        };
+    }
+
+    // A forum post's ID equals its starter message ID, so if a
+    // forum channel was given, open the matching thread.
+    if (
+        channel.type === ChannelType.GuildForum ||
+        channel.type === ChannelType.GuildMedia
+    ) {
+        try {
+            const thread = await channel.threads.fetch(messageId);
+
+            if (thread) channel = thread;
+        } catch {
+            // Ignore; we will try to fetch the message directly.
+        }
+    }
+
+    let message = null;
+
+    try {
+        message = await channel.messages.fetch(messageId);
+    } catch {
+        message = null;
+    }
+
+    if (!message) {
+        return {
+            ok: false,
+            content:
+                "❌ Could not find that message. If it is not in the current channel, pass its channel with the `channel` option."
+        };
+    }
+
+    if (message.author.bot || message.webhookId) {
+        return {
+            ok: false,
+            content: "❌ That message is from a bot/webhook."
+        };
+    }
+
+    if (!hasTranslatableText(message)) {
+        return {
+            ok: false,
+            content:
+                "❌ That message has no translatable text (emoji/image only)."
+        };
+    }
+
+    try {
+        if (
+            await hasTranslateButtonReply(
+                message.channel,
+                message.id
+            )
+        ) {
+            return {
+                ok: false,
+                content:
+                    "ℹ️ That message already has a translate button."
+            };
+        }
+    } catch {
+        // Ignore duplicate-check failures and try anyway.
+    }
+
+    const added = await attachTranslateButton(message, true);
+
+    return added
+        ? {
+              ok: true,
+              content: `✅ Translate button added in <#${message.channel.id}> for [this message](${message.url}).`
+          }
+        : {
+              ok: false,
+              content:
+                  "❌ Could not attach the button. Check the bot's permissions and logs."
+          };
 }
 
 /**
@@ -2003,6 +2122,14 @@ const commands = [
                 )
                 .setRequired(false)
         )
+        .addStringOption(option =>
+            option
+                .setName("message_id")
+                .setDescription(
+                    "Backfill one specific message ID instead of scanning a forum."
+                )
+                .setRequired(false)
+        )
         .addBooleanOption(option =>
             option
                 .setName("include_archived")
@@ -2387,15 +2514,46 @@ discordClient.on(
             await interaction.deferReply({ flags: 64 });
 
             try {
-                const includeArchived =
-                    interaction.options.getBoolean(
-                        "include_archived"
-                    ) || false;
-
                 const targetChannel =
                     interaction.options.getChannel(
                         "channel"
                     );
+
+                const messageId =
+                    interaction.options.getString(
+                        "message_id"
+                    );
+
+                // Single-message mode.
+                if (messageId) {
+                    const channel = targetChannel
+                        ? interaction.guild.channels.cache.get(
+                              targetChannel.id
+                          ) || targetChannel
+                        : interaction.channel;
+
+                    const result =
+                        await backfillSingleMessage(
+                            channel,
+                            messageId.trim()
+                        );
+
+                    console.log(
+                        `🧵 /backfill-forums message ${messageId} by ${userLabel(interaction.user, interaction.member)}: ` +
+                        (result.ok ? "added" : "skipped")
+                    );
+
+                    await interaction.editReply({
+                        content: result.content
+                    });
+
+                    return;
+                }
+
+                const includeArchived =
+                    interaction.options.getBoolean(
+                        "include_archived"
+                    ) || false;
 
                 // Make sure every channel is cached.
                 await interaction.guild.channels.fetch();
