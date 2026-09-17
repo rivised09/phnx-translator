@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const {
     Client,
+    ChannelType,
     GatewayIntentBits,
     Events,
     REST,
@@ -1369,6 +1370,145 @@ async function attachTranslateButton(message) {
 }
 
 /**
+ * Attach a translate button to a single forum post's starter
+ * message. Returns true when a new button was added.
+ */
+async function backfillForumPost(thread) {
+    const starter = await thread.fetchStarterMessage();
+
+    if (!starter) return false;
+    if (!hasTranslatableText(starter)) return false;
+
+    // Skip posts that already have a button reply from us.
+    const existing = await thread.messages.fetch({
+        limit: 100
+    });
+
+    const alreadyHasButton = existing.some(message => {
+        if (
+            !discordClient.user ||
+            message.author.id !== discordClient.user.id
+        ) {
+            return false;
+        }
+
+        return message.components.some(
+            row =>
+                Array.isArray(row.components) &&
+                row.components.some(
+                    component =>
+                        component.customId ===
+                        `translate_${starter.id}`
+                )
+        );
+    });
+
+    if (alreadyHasButton) return false;
+
+    await attachTranslateButton(starter);
+
+    return true;
+}
+
+/**
+ * Backfill translate buttons on every forum post (starter
+ * message) inside the configured translation/restricted
+ * channels and categories. Text channels and thread replies
+ * are intentionally ignored.
+ */
+async function backfillForumPosts(guild, includeArchived = false) {
+    const summary = {
+        forums: 0,
+        posts: 0,
+        added: 0,
+        skipped: 0
+    };
+
+    if (!guild) return summary;
+
+    const forums = guild.channels.cache.filter(
+        channel =>
+            (channel.type === ChannelType.GuildForum ||
+                channel.type === ChannelType.GuildMedia) &&
+            (channelIsConfigured(
+                channel,
+                CONFIG.TRANSLATION_CHANNELS,
+                CONFIG.TRANSLATION_CATEGORIES
+            ) ||
+                channelIsConfigured(
+                    channel,
+                    CONFIG.RESTRICTED_CHANNELS,
+                    CONFIG.RESTRICTED_CATEGORIES
+                ))
+    );
+
+    for (const [, forum] of forums) {
+        summary.forums++;
+
+        const threads = new Map();
+
+        try {
+            const active = await forum.threads.fetchActive();
+
+            for (const [id, thread] of active.threads) {
+                threads.set(id, thread);
+            }
+        } catch (error) {
+            console.error(
+                `❌ Backfill: could not list active posts in ${channelLabel(forum)}:`,
+                error
+            );
+        }
+
+        if (includeArchived) {
+            try {
+                const archived =
+                    await forum.threads.fetchArchived({
+                        fetchAll: true
+                    });
+
+                for (const [id, thread] of archived.threads) {
+                    threads.set(id, thread);
+                }
+            } catch (error) {
+                console.error(
+                    `❌ Backfill: could not list archived posts in ${channelLabel(forum)}:`,
+                    error
+                );
+            }
+        }
+
+        for (const [, thread] of threads) {
+            summary.posts++;
+
+            try {
+                const added = await backfillForumPost(thread);
+
+                if (added) {
+                    summary.added++;
+                } else {
+                    summary.skipped++;
+                }
+            } catch (error) {
+                summary.skipped++;
+
+                console.error(
+                    `❌ Backfill: failed on post in ${channelLabel(forum)}:`,
+                    error
+                );
+            }
+
+            // Gentle pace to stay clear of rate limits.
+            await new Promise(resolve =>
+                setTimeout(resolve, 500)
+            );
+        }
+    }
+
+    return summary;
+}
+
+/**
  * Get a message by ID from the interaction's channel.
  */
 async function fetchMessageInChannel(interaction, messageId) {
@@ -1814,6 +1954,23 @@ const commands = [
             "Show translator status."
         ),
 
+    new SlashCommandBuilder()
+        .setName("backfill-forums")
+        .setDescription(
+            "Add translate buttons to existing forum posts."
+        )
+        .setDefaultMemberPermissions(
+            PermissionFlagsBits.ManageGuild
+        )
+        .addBooleanOption(option =>
+            option
+                .setName("include_archived")
+                .setDescription(
+                    "Also backfill archived posts (un-archives them)."
+                )
+                .setRequired(false)
+        ),
+
     new ContextMenuCommandBuilder()
         .setName("🌐 Translate")
         .setType(ApplicationCommandType.Message)
@@ -2161,6 +2318,77 @@ discordClient.on(
                     `Translation cache: **${translationCache.size}**`,
                 flags: 64
             });
+
+            return;
+        }
+
+        // ====================================================
+        // /backfill-forums
+        // ====================================================
+
+        if (interaction.commandName === "backfill-forums") {
+
+            if (
+                !interaction.memberPermissions
+                    ?.has(
+                        PermissionFlagsBits.ManageGuild
+                    )
+            ) {
+                await interaction.reply({
+                    content:
+                        "❌ You need Manage Server permission.",
+                    flags: 64
+                });
+
+                return;
+            }
+
+            await interaction.deferReply({ flags: 64 });
+
+            try {
+                const includeArchived =
+                    interaction.options.getBoolean(
+                        "include_archived"
+                    ) || false;
+
+                // Make sure every channel is cached.
+                await interaction.guild.channels.fetch();
+
+                const summary = await backfillForumPosts(
+                    interaction.guild,
+                    includeArchived
+                );
+
+                console.log(
+                    `🧵 /backfill-forums by ${userLabel(interaction.user, interaction.member)}: ` +
+                    `${summary.added} added, ${summary.skipped} skipped ` +
+                    `across ${summary.posts} posts in ${summary.forums} forums`
+                );
+
+                await interaction.editReply({
+                    content:
+                        `✅ Forum backfill complete.\n` +
+                        `Forums scanned: **${summary.forums}**\n` +
+                        `Posts scanned: **${summary.posts}**\n` +
+                        `Buttons added: **${summary.added}**\n` +
+                        `Skipped (already had button / no text): **${summary.skipped}**` +
+                        (includeArchived
+                            ? ""
+                            : `\n\n_Archived posts were skipped. Re-run with \`include_archived: true\` to include them._`)
+                });
+
+            } catch (error) {
+
+                console.error(
+                    "❌ /backfill-forums failed:",
+                    error
+                );
+
+                await interaction.editReply({
+                    content:
+                        "❌ Backfill failed. Check the logs."
+                });
+            }
 
             return;
         }
