@@ -193,6 +193,17 @@ const CONFIG = {
     VERIFICATION_CHANNEL_ID: process.env.VERIFICATION_CHANNEL_ID || "",
     LEADERSHIP_ROLE_ID: process.env.LEADERSHIP_ROLE_ID || "",
 
+    // Time-range roles for /phnx-time-selection.
+    //
+    // The keys are the UTC ranges shown on the buttons. Change
+    // the values to EXACTLY match your Discord role names.
+    TIME_ROLES: {
+        "0-6": "🕐 0-6 UTC",
+        "6-12": "🕐 6-12 UTC",
+        "12-18": "🕐 12-18 UTC",
+        "18-24": "🕐 18-24 UTC"
+    },
+
     // Ignore very short messages.
     MINIMUM_MESSAGE_LENGTH: 2,
 
@@ -453,6 +464,133 @@ function getConfiguredLanguageRoles(guild) {
     }
 
     return result;
+}
+
+/**
+ * Find the Discord role matching a /phnx-time-selection
+ * range key (e.g. "0-6"). Matches by name, case/space
+ * insensitive. Returns null when unconfigured or missing.
+ */
+function findTimeRole(guild, key) {
+    const configuredRoleName = CONFIG.TIME_ROLES[key];
+
+    if (!configuredRoleName || !guild) return null;
+
+    return (
+        guild.roles.cache.find(
+            r =>
+                normalizeRoleName(r.name) ===
+                normalizeRoleName(configuredRoleName)
+        ) || null
+    );
+}
+
+/**
+ * List the time-range keys the member currently has.
+ */
+function getMemberTimeKeys(member) {
+    if (!member || !member.roles || !member.roles.cache) {
+        return [];
+    }
+
+    const keys = [];
+
+    for (const [key, configuredRoleName] of Object.entries(
+        CONFIG.TIME_ROLES
+    )) {
+        const hasRole = member.roles.cache.some(
+            r =>
+                normalizeRoleName(r.name) ===
+                normalizeRoleName(configuredRoleName)
+        );
+
+        if (hasRole) keys.push(key);
+    }
+
+    return keys;
+}
+
+/**
+ * Build the public time-selection button row. Buttons are
+ * neutral because the panel is shared by everyone.
+ */
+function buildTimeSelectionRow() {
+    return new ActionRowBuilder().addComponents(
+        Object.keys(CONFIG.TIME_ROLES).map(key =>
+            new ButtonBuilder()
+                .setCustomId(`timesel_${key}`)
+                .setLabel(`${key} UTC`)
+                .setStyle(ButtonStyle.Secondary)
+        )
+    );
+}
+
+/**
+ * Handle a click on a /phnx-time-selection button.
+ * Toggles the matching role on the member. Multiple
+ * selections are allowed, so each click adds or removes
+ * only the clicked range.
+ */
+async function handleTimeSelectionButton(interaction) {
+    const key = interaction.customId.slice(
+        "timesel_".length
+    );
+
+    const role = findTimeRole(interaction.guild, key);
+
+    if (!role) {
+        await interaction.reply({
+            content:
+                `❌ The \`${key} UTC\` role is not set up. Ask an admin to create it or fix its name.`,
+            flags: 64
+        });
+
+        return;
+    }
+
+    const member = interaction.member;
+
+    try {
+        const hadRole = member.roles.cache.has(role.id);
+
+        if (hadRole) {
+            await member.roles.remove(role.id);
+        } else {
+            await member.roles.add(role.id);
+        }
+
+        const selected = getMemberTimeKeys(member);
+
+        console.log(
+            `🕐 ${userLabel(interaction.user, member)} ` +
+            `${hadRole ? "removed" : "added"} time role ${role.name} ` +
+            `(now: ${selected.join(", ") || "none"})`
+        );
+
+        await interaction.reply({
+            content:
+                `${hadRole ? "➖ Removed" : "✅ Added"} **${role.name}**.\n` +
+                `Your ranges: **${
+                    selected.length
+                        ? selected
+                              .map(k => `${k} UTC`)
+                              .join(", ")
+                        : "none"
+                }**`,
+            flags: 64
+        });
+    } catch (error) {
+        console.error(
+            "❌ Could not toggle time role:",
+            error
+        );
+
+        await interaction.reply({
+            content:
+                "❌ Could not update your role. Make sure the bot has **Manage Roles** and its role is above the time roles.",
+            flags: 64
+        });
+    }
 }
 
 /**
@@ -2139,6 +2277,15 @@ const commands = [
                 .setRequired(false)
         ),
 
+    new SlashCommandBuilder()
+        .setName("phnx-time-selection")
+        .setDescription(
+            "Post the UTC time-range role selection panel."
+        )
+        .setDefaultMemberPermissions(
+            PermissionFlagsBits.ManageGuild
+        ),
+
     new ContextMenuCommandBuilder()
         .setName("🌐 Translate")
         .setType(ApplicationCommandType.Message)
@@ -2600,6 +2747,31 @@ discordClient.on(
 
             return;
         }
+
+        // ====================================================
+        // /phnx-time-selection
+        // ====================================================
+
+        if (
+            interaction.commandName ===
+            "phnx-time-selection"
+        ) {
+
+            console.log(
+                `🕐 /phnx-time-selection posted by ${userLabel(interaction.user, interaction.member)} ` +
+                `in ${channelLabel(interaction.channel)}`
+            );
+
+            await interaction.reply({
+                content:
+                    "🕐 **Select your active UTC time range(s)**\n" +
+                    "Click one or more buttons to add or remove that range. " +
+                    "You can pick as many as you like.",
+                components: [buildTimeSelectionRow()]
+            });
+
+            return;
+        }
     }
 );
 
@@ -2815,6 +2987,15 @@ discordClient.on(
         if (!interaction.isButton()) return;
 
         const customId = interaction.customId;
+
+        // ====================================================
+        // TIME-RANGE SELECTION BUTTONS
+        // ====================================================
+
+        if (customId.startsWith("timesel_")) {
+            await handleTimeSelectionButton(interaction);
+            return;
+        }
 
         // ====================================================
         // PRIVATE TRANSLATE BUTTON
