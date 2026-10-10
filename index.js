@@ -2765,8 +2765,7 @@ discordClient.on(
             await interaction.reply({
                 content:
                     "🕐 **Select your active UTC time range(s)**\n" +
-                    "Click one or more buttons to add or remove that range. " +
-                    "You can pick as many as you like.",
+                    "Click one or more buttons to add or remove that range. ",
                 components: [buildTimeSelectionRow()]
             });
 
