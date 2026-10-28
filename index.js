@@ -1,5 +1,7 @@
 require("dotenv").config();
 
+const http = require("http");
+
 const {
     Client,
     ChannelType,
@@ -3418,6 +3420,31 @@ process.on(
         );
     }
 );
+
+// ============================================================
+// HEALTH SERVER (Render uptime)
+// ============================================================
+// Render's free tier spins the service down after inactivity.
+// An uptime monitor (e.g. BetterStack) GETs this endpoint every
+// few minutes to keep the web service awake.
+
+const healthServer = http.createServer((req, res) => {
+    const url = (req.url || "/").toLowerCase();
+
+    if (req.method === "GET" && (url === "/" || url === "/health")) {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("Bot is running!\n");
+    } else {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("Not found\n");
+    }
+});
+
+const PORT = parseInt(process.env.PORT || "10000", 10);
+
+healthServer.listen(PORT, "0.0.0.0", () => {
+    console.log(`🌐 Health server listening on port ${PORT}`);
+});
 
 // ============================================================
 // LOGIN
